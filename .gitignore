@@ -1,0 +1,60 @@
+# Credenciais
+.env
+.env.local
+*.pfx
+*.p12
+*.pem
+*.key
+certs/*
+!certs/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.venv/
+.env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Planilhas com dados reais (mantém apenas o modelo)
+empresas_autorizadas.xlsx
+!empresas_autorizadas_modelo.xlsx
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Autosave/temp do editor (Claude Code e similares)
+*.tmp.5.*
+*.tmp
+
+# Outputs
+nfse_emitidas/
+xml_temp/
+
+# Mobile (React Native / Expo)
+node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/web-build/
+*.apk
+
+# Backups de planilha (dados de clientes)
+empresas_autorizadas.bak_*.xlsx
+*.bak
+
+# Arquivo de teste com credencial
+mobile/test_login.json

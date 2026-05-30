@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Iugu NFS-e",
+    "slug": "iugu-nfse-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#1a56db"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#1a56db"
+      },
+      "package": "com.megasuporte.iugonfse"
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
+  }
+}

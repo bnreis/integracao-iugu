@@ -1,0 +1,37 @@
+# ============================================================
+# Dependências do projeto Integração Iugu + NFS-e DF
+# ============================================================
+
+# --- HTTP / API ---
+httpx>=0.27.0              # Cliente HTTP moderno (sync e async)
+requests>=2.32.0           # Cliente HTTP clássico (fallback)
+
+# --- Servidor de Webhook ---
+fastapi>=0.115.0           # Framework web moderno para receber webhooks
+uvicorn[standard]>=0.30.0  # Servidor ASGI para FastAPI
+python-multipart>=0.0.9    # Parse application/x-www-form-urlencoded (formato do Iugu)
+
+# --- Planilha Excel ---
+openpyxl>=3.1.5            # Leitura/escrita de arquivos .xlsx
+
+# --- NFS-e Nacional (CGNFS-e) — padrão nacional vigente desde 01/01/2026 ---
+nfelib>=2.3.0              # Bindings oficiais NFS-e nacional (gera/lê XML da DPS)
+erpbrasil.assinatura>=1.8  # Assinatura XML-DSig com certificado A1 (.pfx)
+lxml>=5.2.0                # Manipulação de XML (dep transitiva, explícita aqui)
+cryptography>=42.0.0       # Manipulação de certificados .pfx (A1)
+zeep>=4.2.1                # Cliente SOAP (para envio ao webservice do DF)
+
+# --- MCP (Model Context Protocol) ---
+mcp[cli]>=1.2.0            # SDK oficial do MCP em Python
+
+# --- Configuração ---
+python-dotenv>=1.0.1       # Carrega variáveis de .env
+pydantic>=2.8.0            # Validação de dados
+pydantic-settings>=2.4.0   # Configurações tipadas
+
+# --- Autenticação (API de gestão / app mobile) ---
+PyJWT>=2.8.0               # Tokens JWT para autenticação
+
+# --- Utilidades ---
+loguru>=0.7.2              # Logging mais agradável
+python-dateutil>=2.9.0     # Manipulação de datas
