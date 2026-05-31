@@ -113,8 +113,8 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
                                                  │
                                                  │ CNPJ → empresa autorizada?
                                                  ▼
-                                         src/spreadsheet.py
-                                         (empresas_autorizadas.xlsx)
+                                         src/iugu_empresas.py
+                                         (customers da Iugu + notes JSON)
                                                  │ sim
                                                  ▼
                                          src/nfse_df.py
@@ -139,9 +139,9 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
                                                   por src/auth.py)
 ```
 
-**Duas fontes de dados de empresas:**
-- `src/spreadsheet.py` — lê/escreve `empresas_autorizadas.xlsx` (fonte original, ainda usada em produção).
-- `src/iugu_empresas.py` — alternativa que usa a Iugu como fonte única de dados (armazena config de negócio no campo `notes` do customer Iugu como JSON). Mesma interface pública (`Empresa`, `EmpresasRepository`). Migração ainda não rolou em produção — pergunte ao Bruno qual fonte está ativa antes de alterar.
+**Fonte de dados de empresas: a Iugu (NÃO a planilha).** Confirmado por inspeção dos imports + execução real em 2026-05-30.
+- `src/iugu_empresas.py` — **fonte ativa em produção**. Lê todos os customers da Iugu e monta a config de negócio (`codigo_servico`, `aliquota_iss`, `emitir_nf`, etc.) a partir do campo `notes` (JSON) de cada cliente. Importado por `webhook_server`, `scheduled_invoices`, `nfse_df`, `email_nfse` e `api_routes`.
+- `src/spreadsheet.py` — **legado**. Lê `empresas_autorizadas.xlsx`. Só sobrevive em scripts utilitários (`emitir_nfse_manual`, `import_clients_from_iugu`, `test_connection`, etc.). ⚠️ O xlsx está **desatualizado e divergente da Iugu** — não use como fonte nem confie nesses scripts para dados reais.
 
 **Por que o "patch v1.01"?** A `nfelib` ainda emite XML no schema v1.00, mas o DF rejeita com E160 (Reforma Tributária mudou estrutura). `nfse_df.py` gera v1.00 e aplica 5 transformações via `lxml` para virar v1.01 válido — ver `_patch_xml_para_v101()`. Os 4 bugs específicos do schema estão tabulados em **Histórico de bugs** abaixo.
 
@@ -151,8 +151,8 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 |---|---|---|
 | `src/iugu_client.py` | Estável em produção | Só com bug reproduzível |
 | `src/webhook_server.py` | Estável em produção | Só com bug reproduzível |
-| `src/spreadsheet.py` | Schema 12 colunas validado | Mudança de schema requer migração + alinhamento com Bruno |
-| `src/iugu_empresas.py` | Implementado, não migrado para produção | Confirmar com Bruno antes de trocar a fonte ativa |
+| `src/iugu_empresas.py` | **Fonte ativa em produção** | Só com bug reproduzível; mudar campo no `notes` exige alinhamento |
+| `src/spreadsheet.py` | Legado — só scripts utilitários; xlsx desatualizado | Evitar; não usar como fonte de dados |
 | `src/scheduled_invoices.py` | Estável | Só com bug reproduzível |
 | `mcp_iugu/server.py` | Estável | Só com bug reproduzível |
 | `src/nfse_df.py` | Estável estruturalmente; bloqueios atuais são cadastrais | Sim, se aparecer novo erro de schema |
@@ -210,8 +210,8 @@ src/
 ├── webhook_server.py     FastAPI: webhooks + monta routers
 ├── api_routes.py         endpoints /api/* (gestão para mobile, JWT)
 ├── auth.py               login + dependency JWT
-├── spreadsheet.py        repositório da planilha (12 colunas)
-├── iugu_empresas.py      ★ alternativa ao spreadsheet.py — Iugu como fonte única
+├── iugu_empresas.py      ★ FONTE ATIVA — empresas vêm da Iugu (notes JSON)
+├── spreadsheet.py        legado (xlsx desatualizado) — só scripts utilitários
 ├── scheduled_invoices.py boletos recorrentes mensais
 ├── nfse_df.py            emissão NFS-e DF (DPS v1.01 + assinatura + SOAP)
 ├── pdf_nfse.py           DANFSE customizado (reportlab + qrcode)
@@ -233,6 +233,6 @@ scripts/                  Utilitários CLI (ver "Comandos comuns" acima)
 docs/                     Documentação + manual oficial + XSD/exemplos
 certs/*.pfx               Certificado A1 (não commitar)
 nfse_emitidas/            XMLs enviados/recebidos + PDFs gerados
-empresas_autorizadas.xlsx Planilha de clientes ativos
+empresas_autorizadas.xlsx Planilha LEGADA (desatualizada; fonte real é a Iugu)
 .env                      Configurações + credenciais (não commitar)
 ```

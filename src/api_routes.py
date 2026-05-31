@@ -42,6 +42,8 @@ from .iugu_empresas import (
     EmpresasRepository,
     empresa_para_notes_json,
     format_cents_to_br,
+    get_repo,
+    invalidar_cache,
     normalizar_cnpj,
 )
 
@@ -217,8 +219,7 @@ async def dashboard(
 
     # Empresas ativas (agora via Iugu)
     try:
-        repo = EmpresasRepository()
-        repo.carregar(forcar=True)
+        repo = get_repo()
         total_empresas = len(repo.listar_ativas())
     except Exception:
         total_empresas = 0
@@ -277,6 +278,9 @@ class CriarFaturaRequest(BaseModel):
     valor_cents: int = PydField(..., gt=0, description="Valor em centavos")
     descricao: str = PydField("Servico mensal", description="Descricao do item")
     dias_vencimento: int = PydField(10, ge=1, le=90, description="Dias ate o vencimento")
+    observacoes: Optional[str] = PydField(
+        None, description="Observacoes que aparecem na fatura para o cliente (opcional)"
+    )
 
 
 @api_router.get("/faturas")
@@ -398,8 +402,7 @@ async def detalhe_fatura(invoice_id: str):
 @api_router.post("/faturas")
 async def criar_fatura(req: CriarFaturaRequest):
     """Cria uma fatura manual para uma empresa cadastrada."""
-    repo = EmpresasRepository()
-    repo.carregar(forcar=True)
+    repo = get_repo()
     cnpj_limpo = normalizar_cnpj(req.cnpj)
     empresa = repo.buscar_por_cnpj(cnpj_limpo)
 
@@ -432,6 +435,10 @@ async def criar_fatura(req: CriarFaturaRequest):
             {"name": "cnpj_tomador", "value": empresa.cnpj},
         ],
     }
+
+    # Observações: campo nativo da Iugu que aparece na fatura para o cliente.
+    if req.observacoes and req.observacoes.strip():
+        payload["observations"] = req.observacoes.strip()
 
     try:
         with IuguClient() as client:
@@ -530,8 +537,7 @@ async def reenviar_nfse_email(invoice_id: str):
     if not cnpj:
         raise HTTPException(400, "CNPJ nao identificavel na fatura")
 
-    repo = EmpresasRepository()
-    repo.carregar(forcar=True)
+    repo = get_repo()
     empresa = repo.buscar_por_cnpj(cnpj)
     if not empresa:
         raise HTTPException(404, f"CNPJ {cnpj} nao encontrado no cadastro")
@@ -629,6 +635,8 @@ async def cadastrar_empresa(req: CriarEmpresaRequest):
     customer_id = customer.get("id", "")
     logger.info(f"Empresa cadastrada: {req.razao_social} (CNPJ {cnpj_limpo}) -- customer Iugu: {customer_id}")
 
+    invalidar_cache()  # nova empresa aparece imediatamente nas leituras
+
     return {
         "sucesso": True,
         "customer_id": customer_id,
@@ -643,8 +651,7 @@ async def listar_empresas(
     apenas_ativas: bool = Query(True, description="Filtrar apenas empresas ativas"),
 ):
     """Lista empresas cadastradas (via Iugu)."""
-    repo = EmpresasRepository()
-    repo.carregar(forcar=True)
+    repo = get_repo()
 
     empresas = repo.listar_ativas() if apenas_ativas else list(repo._empresas.values())
 
@@ -684,8 +691,7 @@ async def listar_empresas(
 @api_router.get("/empresas/{cnpj}")
 async def detalhe_empresa(cnpj: str):
     """Detalhes de uma empresa pelo CNPJ."""
-    repo = EmpresasRepository()
-    repo.carregar(forcar=True)
+    repo = get_repo()
     cnpj_limpo = normalizar_cnpj(cnpj)
     empresa = repo.buscar_por_cnpj(cnpj_limpo)
     if not empresa:
@@ -782,6 +788,8 @@ async def editar_empresa(cnpj: str, req: EditarEmpresaRequest):
     campos_atualizados = list(req.model_dump(exclude_none=True).keys())
     logger.info(f"Empresa {cnpj} atualizada na Iugu: {campos_atualizados}")
 
+    invalidar_cache()  # mudancas aparecem imediatamente nas leituras
+
     return {
         "sucesso": True,
         "cnpj": cnpj_limpo,
@@ -808,6 +816,8 @@ async def excluir_empresa(cnpj: str):
         raise HTTPException(502, f"Erro ao excluir customer Iugu: {e.message}")
 
     logger.info(f"Empresa excluida: {razao_social} (CNPJ {cnpj_limpo})")
+
+    invalidar_cache()  # remocao reflete imediatamente nas leituras
 
     return {
         "sucesso": True,
@@ -867,8 +877,7 @@ def _buscar_nfse_da_fatura(invoice_id: str) -> Optional[dict]:
 def _carregar_cnpjs_nf_na_criacao() -> set[str]:
     """Retorna set de CNPJs com nf_na_criacao=True."""
     try:
-        repo = EmpresasRepository()
-        repo.carregar()
+        repo = get_repo()
         return {
             e.cnpj
             for e in repo._empresas.values()

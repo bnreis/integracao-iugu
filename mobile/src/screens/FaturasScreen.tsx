@@ -21,6 +21,8 @@ import {
   emitirNfse,
   reenviarNfseEmail,
 } from "../services/api";
+import { usePullToRefresh } from "../components/usePullToRefresh";
+import PullIndicator from "../components/PullIndicator";
 
 // ============================================================
 // Helpers de mês
@@ -153,6 +155,14 @@ export default function FaturasScreen() {
   useEffect(() => {
     fetchFaturas();
   }, [fetchFaturas]);
+
+  // Pull-to-refresh customizado (web). No APK nativo, o RefreshControl abaixo
+  // continua cuidando do gesto.
+  const scrollTopRef = useRef(0);
+  const { wrapperRef, pull } = usePullToRefresh(
+    () => scrollTopRef.current,
+    fetchFaturas
+  );
 
   // Data de corte: março/2026
   const CORTE_ANO = 2026;
@@ -368,22 +378,29 @@ export default function FaturasScreen() {
       </ScrollView>
 
       {/* Lista */}
-      <FlatList
-        data={faturas}
-        keyExtractor={(item) => item.id}
-        renderItem={renderFatura}
-        refreshControl={
-          <RefreshControl refreshing={loading} onRefresh={fetchFaturas} />
-        }
-        contentContainerStyle={styles.lista}
-        ListEmptyComponent={
-          loading ? (
-            <ActivityIndicator size="large" color="#1a56db" style={{ marginTop: 60 }} />
-          ) : (
-            <Text style={styles.emptyText}>Nenhuma fatura neste mês</Text>
-          )
-        }
-      />
+      <View ref={wrapperRef} style={{ flex: 1 }}>
+        <PullIndicator pull={pull} refreshing={loading} />
+        <FlatList
+          data={faturas}
+          keyExtractor={(item) => item.id}
+          renderItem={renderFatura}
+          onScroll={(e) => {
+            scrollTopRef.current = e.nativeEvent.contentOffset.y;
+          }}
+          scrollEventThrottle={16}
+          refreshControl={
+            <RefreshControl refreshing={loading} onRefresh={fetchFaturas} />
+          }
+          contentContainerStyle={styles.lista}
+          ListEmptyComponent={
+            loading ? (
+              <ActivityIndicator size="large" color="#1a56db" style={{ marginTop: 60 }} />
+            ) : (
+              <Text style={styles.emptyText}>Nenhuma fatura neste mês</Text>
+            )
+          }
+        />
+      </View>
 
       {/* Modal de detalhes */}
       <Modal visible={modalVisible} animationType="slide" transparent>

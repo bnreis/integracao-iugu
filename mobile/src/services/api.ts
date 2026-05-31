@@ -8,9 +8,9 @@
 const IS_WEB =
   typeof document !== "undefined" && typeof window !== "undefined";
 
-const BASE_URL = IS_WEB
-  ? `${window.location.protocol}//${window.location.hostname}:8000`
-  : "http://192.168.0.60:8000";
+// Web (painel servido pelo Apache em iugu.megasuporte.com): mesma origem → URLs relativas (/api, /auth)
+// Nativo (APK): aponta direto para o backend de produção
+const BASE_URL = IS_WEB ? "" : "https://iugu.megasuporte.com";
 
 // ============================================================
 // Token management — memória simples (funciona em todas plataformas)
@@ -154,6 +154,7 @@ export async function criarFatura(dados: {
   valor_cents: number;
   descricao: string;
   dias_vencimento?: number;
+  observacoes?: string;
 }) {
   return request("POST", "/api/faturas", dados);
 }

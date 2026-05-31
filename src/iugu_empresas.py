@@ -33,6 +33,8 @@ Mapeamento de campos:
 from __future__ import annotations
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -311,18 +313,26 @@ class EmpresasRepository:
                     if start >= total:
                         break
 
-                # Passo 2: buscar cada customer individualmente (traz notes)
-                logger.debug(f"[CARREGAR debug] Buscando {len(todos_ids)} customers individualmente...")
-                for cust_id in todos_ids:
+                # Passo 2: buscar cada customer individualmente (traz notes).
+                # Em paralelo para reduzir o tempo total — o list_customers nao
+                # retorna notes, entao e preciso 1 GET por cliente.
+                logger.debug(f"[CARREGAR] Buscando {len(todos_ids)} customers em paralelo...")
+
+                def _fetch(cust_id: str) -> Optional[dict]:
                     try:
-                        cust = client.get_customer(cust_id)
-                        notes_raw = cust.get("notes", "")
-                        logger.debug(f"[CARREGAR debug] Customer {cust.get('name','?')}: notes={str(notes_raw)[:100]!r}")
-                        emp = customer_para_empresa(cust)
-                        if emp:
-                            self._empresas[emp.cnpj] = emp
+                        return client.get_customer(cust_id)
                     except IuguAPIError as e:
                         logger.warning(f"Erro ao buscar customer {cust_id}: {e.message}")
+                        return None
+
+                if todos_ids:
+                    with ThreadPoolExecutor(max_workers=8) as executor:
+                        for cust in executor.map(_fetch, todos_ids):
+                            if not cust:
+                                continue
+                            emp = customer_para_empresa(cust)
+                            if emp:
+                                self._empresas[emp.cnpj] = emp
         except IuguAPIError as e:
             logger.error(f"Erro ao carregar customers da Iugu: {e.message}")
             raise
@@ -359,3 +369,36 @@ class EmpresasRepository:
             if emp.customer_id == customer_id and emp.ativo:
                 return emp
         return None
+
+
+# ============================================================
+# Cache compartilhado (modulo) — evita reler a Iugu a cada request
+# ============================================================
+_repo_cache: Optional["EmpresasRepository"] = None
+_repo_cache_ts: float = 0.0
+_REPO_CACHE_TTL = 300.0  # 5 minutos
+
+
+def get_repo(forcar: bool = False) -> "EmpresasRepository":
+    """Repositorio de empresas compartilhado e cacheado em memoria.
+
+    Evita reler todos os customers da Iugu (1 GET por cliente) a cada
+    requisicao. Expira em _REPO_CACHE_TTL segundos. As rotas de escrita
+    (cadastrar/editar/excluir) chamam invalidar_cache() para refletir
+    mudancas imediatamente.
+    """
+    global _repo_cache, _repo_cache_ts
+    agora = time.monotonic()
+    if _repo_cache is None or forcar or (agora - _repo_cache_ts) > _REPO_CACHE_TTL:
+        repo = EmpresasRepository()
+        repo.carregar(forcar=True)
+        _repo_cache = repo
+        _repo_cache_ts = agora
+    return _repo_cache
+
+
+def invalidar_cache() -> None:
+    """Descarta o cache — a proxima leitura recarrega da Iugu."""
+    global _repo_cache, _repo_cache_ts
+    _repo_cache = None
+    _repo_cache_ts = 0.0

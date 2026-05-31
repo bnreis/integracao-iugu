@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -14,6 +14,8 @@ import {
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { getDashboard, emitirNfse, cancelarFatura } from "../services/api";
+import { usePullToRefresh } from "../components/usePullToRefresh";
+import PullIndicator from "../components/PullIndicator";
 
 // ============================================================
 // Helpers
@@ -296,6 +298,12 @@ export default function DashboardScreen() {
     year: "numeric",
   });
 
+  const scrollTopRef = useRef(0);
+  const { wrapperRef, pull } = usePullToRefresh(
+    () => scrollTopRef.current,
+    fetchData
+  );
+
   if (loading && !data) {
     return (
       <View style={styles.loadingContainer}>
@@ -306,12 +314,18 @@ export default function DashboardScreen() {
   }
 
   return (
-    <ScrollView
-      style={styles.container}
-      refreshControl={
-        <RefreshControl refreshing={loading} onRefresh={fetchData} />
-      }
-    >
+    <View ref={wrapperRef} style={{ flex: 1 }}>
+      <PullIndicator pull={pull} refreshing={loading} />
+      <ScrollView
+        style={styles.container}
+        onScroll={(e) => {
+          scrollTopRef.current = e.nativeEvent.contentOffset.y;
+        }}
+        scrollEventThrottle={16}
+        refreshControl={
+          <RefreshControl refreshing={loading} onRefresh={fetchData} />
+        }
+      >
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.greeting}>Dashboard</Text>
@@ -382,6 +396,7 @@ export default function DashboardScreen() {
                 icon="business"
                 label="Empresas"
                 value={data.empresas_ativas}
+                sublabel="Ativas"
                 color="#0891b2"
                 small
               />
@@ -510,7 +525,8 @@ export default function DashboardScreen() {
           <View style={{ height: 24 }} />
         </>
       )}
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 }
 

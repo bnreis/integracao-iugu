@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -16,6 +16,50 @@ import {
 import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect } from "@react-navigation/native";
 import { getEmpresas, criarFatura, emitirNfse, excluirEmpresa } from "../services/api";
+import { usePullToRefresh } from "../components/usePullToRefresh";
+import PullIndicator from "../components/PullIndicator";
+
+// Converte um valor em reais (aceita "150,00", "1.500,00", "150.00", número) em number.
+function parseReais(s: any): number {
+  let c = String(s ?? "").replace(/[R$\s]/g, "");
+  if (c.includes(",")) c = c.replace(/\./g, "").replace(",", ".");
+  return Number(c);
+}
+
+// Formata number como "150,00".
+function formatReais(n: number): string {
+  return n.toFixed(2).replace(".", ",");
+}
+
+// Data de hoje + N dias no formato DD/MM/AAAA.
+function dataMaisDias(dias: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + dias);
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mm}/${d.getFullYear()}`;
+}
+
+// Quantos dias faltam até a data DD/MM/AAAA (null se inválida).
+function diasAteData(ddmmaaaa: string): number | null {
+  const m = ddmmaaaa.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (!m) return null;
+  const dia = Number(m[1]);
+  const mes = Number(m[2]);
+  const ano = Number(m[3]);
+  const d = new Date(ano, mes - 1, dia);
+  if (
+    isNaN(d.getTime()) ||
+    d.getDate() !== dia ||
+    d.getMonth() !== mes - 1 ||
+    d.getFullYear() !== ano
+  )
+    return null;
+  d.setHours(0, 0, 0, 0);
+  const hoje = new Date();
+  hoje.setHours(0, 0, 0, 0);
+  return Math.round((d.getTime() - hoje.getTime()) / 86400000);
+}
 
 export default function EmpresasScreen({ navigation }: any) {
   const [empresas, setEmpresas] = useState<any[]>([]);
@@ -24,6 +68,12 @@ export default function EmpresasScreen({ navigation }: any) {
   const [selecionada, setSelecionada] = useState<any>(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  // Modal "Gerar Fatura" (valor + vencimento editáveis para esta fatura)
+  const [faturaModalVisible, setFaturaModalVisible] = useState(false);
+  const [faturaValor, setFaturaValor] = useState("");
+  const [faturaVenc, setFaturaVenc] = useState("");
+  const [faturaObs, setFaturaObs] = useState("");
 
   const confirmar = (titulo: string, mensagem: string, onConfirm: () => void) => {
     if (Platform.OS === "web") {
@@ -58,6 +108,12 @@ export default function EmpresasScreen({ navigation }: any) {
     setLoading(false);
   }, []);
 
+  const scrollTopRef = useRef(0);
+  const { wrapperRef, pull } = usePullToRefresh(
+    () => scrollTopRef.current,
+    fetchEmpresas
+  );
+
   const empresasFiltradas = useMemo(() => {
     if (!busca.trim()) return empresas;
     const termo = busca.toLowerCase().trim();
@@ -81,31 +137,56 @@ export default function EmpresasScreen({ navigation }: any) {
     setModalVisible(true);
   };
 
-  const handleGerarFatura = async () => {
+  // Abre o formulário pré-preenchido com os valores padrão da empresa.
+  const handleGerarFatura = () => {
     if (!selecionada) return;
-    if (!selecionada.valor_fatura || Number(selecionada.valor_fatura) <= 0) {
-      alertMsg("Atencao", "Esta empresa nao tem valor de fatura definido.");
+    const v = parseReais(selecionada.valor_fatura);
+    setFaturaValor(v && v > 0 ? formatReais(v) : "");
+    setFaturaVenc(dataMaisDias(10)); // vencimento padrão: 10 dias
+    setFaturaObs(""); // observação começa em branco (por fatura)
+    setModalVisible(false);
+    setFaturaModalVisible(true);
+  };
+
+  // Valida o que o usuário ajustou e cria a fatura (só para esta fatura —
+  // não altera o valor/dia padrão cadastrado na empresa).
+  const confirmarGerarFatura = async () => {
+    if (!selecionada) return;
+    const valor = parseReais(faturaValor);
+    if (!valor || valor <= 0) {
+      alertMsg("Atencao", "Informe um valor válido (ex: 150,00).");
       return;
     }
-    confirmar(
-      "Gerar fatura",
-      `Criar fatura de R$ ${selecionada.valor_fatura} para ${selecionada.razao_social}?`,
-      async () => {
-        setSaving(true);
-        const valorCents = Math.round(Number(selecionada.valor_fatura) * 100);
-        const res = await criarFatura({
-          cnpj: selecionada.cnpj,
-          valor_cents: valorCents,
-          descricao: selecionada.descricao_boleto || selecionada.descricao_servico || "Servico de TI",
-        });
-        setSaving(false);
-        if (res.data?.invoice_id) {
-          alertMsg("Sucesso", `Fatura criada!\nID: ${res.data.invoice_id}`);
-        } else {
-          alertMsg("Erro", res.error || res.data?.error || "Falha ao criar fatura");
-        }
-      },
-    );
+    const dias = diasAteData(faturaVenc);
+    if (dias === null) {
+      alertMsg("Atencao", "Data de vencimento inválida. Use o formato DD/MM/AAAA.");
+      return;
+    }
+    if (dias < 1 || dias > 90) {
+      alertMsg(
+        "Atencao",
+        "O vencimento deve estar entre 1 e 90 dias a partir de hoje."
+      );
+      return;
+    }
+    setSaving(true);
+    const res = await criarFatura({
+      cnpj: selecionada.cnpj,
+      valor_cents: Math.round(valor * 100),
+      descricao:
+        selecionada.descricao_boleto ||
+        selecionada.descricao_servico ||
+        "Servico de TI",
+      dias_vencimento: dias,
+      observacoes: faturaObs.trim() || undefined,
+    });
+    setSaving(false);
+    if (res.data?.sucesso) {
+      setFaturaModalVisible(false);
+      alertMsg("Sucesso", `Fatura criada!\nID: ${res.data.id}`);
+    } else {
+      alertMsg("Erro", res.error || res.data?.error || "Falha ao criar fatura");
+    }
   };
 
   const handleGerarNfse = async () => {
@@ -260,24 +341,31 @@ export default function EmpresasScreen({ navigation }: any) {
         )}
       </View>
 
-      <FlatList
-        data={empresasFiltradas}
-        keyExtractor={(item) => item.cnpj}
-        renderItem={renderEmpresa}
-        refreshControl={
-          <RefreshControl refreshing={loading} onRefresh={fetchEmpresas} />
-        }
-        contentContainerStyle={styles.lista}
-        ListEmptyComponent={
-          loading ? (
-            <ActivityIndicator size="large" color="#1a56db" style={{ marginTop: 60 }} />
-          ) : (
-            <Text style={styles.emptyText}>
-              {busca.trim() ? "Nenhuma empresa encontrada" : "Nenhuma empresa cadastrada"}
-            </Text>
-          )
-        }
-      />
+      <View ref={wrapperRef} style={{ flex: 1 }}>
+        <PullIndicator pull={pull} refreshing={loading} />
+        <FlatList
+          data={empresasFiltradas}
+          keyExtractor={(item) => item.cnpj}
+          renderItem={renderEmpresa}
+          onScroll={(e) => {
+            scrollTopRef.current = e.nativeEvent.contentOffset.y;
+          }}
+          scrollEventThrottle={16}
+          refreshControl={
+            <RefreshControl refreshing={loading} onRefresh={fetchEmpresas} />
+          }
+          contentContainerStyle={styles.lista}
+          ListEmptyComponent={
+            loading ? (
+              <ActivityIndicator size="large" color="#1a56db" style={{ marginTop: 60 }} />
+            ) : (
+              <Text style={styles.emptyText}>
+                {busca.trim() ? "Nenhuma empresa encontrada" : "Nenhuma empresa cadastrada"}
+              </Text>
+            )
+          }
+        />
+      </View>
 
       {/* Modal detalhes */}
       <Modal visible={modalVisible} animationType="slide" transparent>
@@ -355,9 +443,106 @@ export default function EmpresasScreen({ navigation }: any) {
           </View>
         </View>
       </Modal>
+
+      {/* Modal: gerar fatura com valor e vencimento editáveis */}
+      <Modal visible={faturaModalVisible} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <TouchableOpacity
+              style={styles.modalClose}
+              onPress={() => setFaturaModalVisible(false)}
+            >
+              <Ionicons name="close" size={24} color="#6b7280" />
+            </TouchableOpacity>
+
+            <Text style={styles.modalTitle}>Gerar fatura</Text>
+            {selecionada && (
+              <Text style={styles.modalCnpj} numberOfLines={2}>
+                {selecionada.razao_social}
+              </Text>
+            )}
+
+            <Text style={fieldStyles.label}>Valor (R$)</Text>
+            <TextInput
+              style={fieldStyles.input}
+              value={faturaValor}
+              onChangeText={setFaturaValor}
+              placeholder="0,00"
+              keyboardType="decimal-pad"
+            />
+
+            <Text style={fieldStyles.label}>Vencimento (DD/MM/AAAA)</Text>
+            <TextInput
+              style={fieldStyles.input}
+              value={faturaVenc}
+              onChangeText={setFaturaVenc}
+              placeholder="DD/MM/AAAA"
+              maxLength={10}
+            />
+
+            <Text style={fieldStyles.label}>Observações (opcional)</Text>
+            <TextInput
+              style={[fieldStyles.input, { height: 90, textAlignVertical: "top" }]}
+              value={faturaObs}
+              onChangeText={setFaturaObs}
+              placeholder="Texto que aparece na fatura para o cliente"
+              multiline
+              numberOfLines={4}
+            />
+
+            <Text style={fieldStyles.hint}>
+              Estes valores valem só para esta fatura — não alteram o padrão
+              cadastrado na empresa.
+            </Text>
+
+            <TouchableOpacity
+              style={[
+                styles.actionBtn,
+                { backgroundColor: "#1a56db", marginTop: 18 },
+              ]}
+              onPress={confirmarGerarFatura}
+              disabled={saving}
+            >
+              <Ionicons name="document-text" size={18} color="#fff" />
+              <Text style={styles.actionBtnText}>
+                {saving ? "Gerando..." : "Gerar fatura"}
+              </Text>
+            </TouchableOpacity>
+            {saving && (
+              <ActivityIndicator style={{ marginTop: 12 }} color="#1a56db" />
+            )}
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
+
+const fieldStyles = StyleSheet.create({
+  label: {
+    fontSize: 13,
+    color: "#6b7280",
+    fontWeight: "600",
+    marginTop: 16,
+    marginBottom: 6,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "#d1d5db",
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    fontSize: 16,
+    backgroundColor: "#fff",
+    color: "#111827",
+  },
+  hint: {
+    fontSize: 12,
+    color: "#9ca3af",
+    marginTop: 12,
+    lineHeight: 16,
+  },
+});
 
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
