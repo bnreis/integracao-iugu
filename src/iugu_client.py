@@ -260,6 +260,18 @@ class IuguClient:
         Returns:
             dict com {totalItems, items: [...]}
         """
+        # A Iugu trata os filtros '*_to' como exclusivos no inicio do dia. Se vier
+        # so a data (YYYY-MM-DD), avancamos 1 dia para incluir o dia inteiro —
+        # senao faturas criadas/pagas no proprio dia do limite ficam de fora
+        # (ex.: faturas criadas no ultimo dia do mes nao apareciam na listagem).
+        import re as _re
+        from datetime import date as _date, timedelta as _timedelta
+
+        def _to_inclusivo(v: Any) -> Any:
+            if isinstance(v, str) and _re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+                return (_date.fromisoformat(v) + _timedelta(days=1)).isoformat()
+            return v
+
         params: dict[str, Any] = {"limit": limit, "start": start}
         if status:
             params["status_filter"] = status
@@ -268,15 +280,15 @@ class IuguClient:
         if created_at_from:
             params["created_at_from"] = created_at_from
         if created_at_to:
-            params["created_at_to"] = created_at_to
+            params["created_at_to"] = _to_inclusivo(created_at_to)
         if paid_at_from:
             params["paid_at_from"] = paid_at_from
         if paid_at_to:
-            params["paid_at_to"] = paid_at_to
+            params["paid_at_to"] = _to_inclusivo(paid_at_to)
         if due_date_from:
             params["due_date_from"] = due_date_from
         if due_date_to:
-            params["due_date_to"] = due_date_to
+            params["due_date_to"] = _to_inclusivo(due_date_to)
         if sortBy:
             params["sortBy"] = sortBy
         if query:
