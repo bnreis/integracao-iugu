@@ -527,6 +527,39 @@ export default function FaturasScreen() {
                     color="#1a56db"
                   />
                 )}
+
+                {/* Histórico da fatura (logs da Iugu) */}
+                {Array.isArray(detalhe.logs) && detalhe.logs.length > 0 && (
+                  <View style={{ marginTop: 22, borderTopWidth: 1, borderTopColor: "#f3f4f6", paddingTop: 14 }}>
+                    <Text style={{ fontSize: 16, fontWeight: "700", color: "#111827", marginBottom: 12 }}>
+                      Histórico
+                    </Text>
+                    {detalhe.logs.map((log: any, i: number) => (
+                      <View key={i} style={{ flexDirection: "row", marginBottom: 12 }}>
+                        <View
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: 4,
+                            backgroundColor: "#1a56db",
+                            marginTop: 5,
+                            marginRight: 10,
+                          }}
+                        />
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ fontSize: 14, color: "#111827" }}>
+                            {log.description || "—"}
+                          </Text>
+                          {log.created_at ? (
+                            <Text style={{ fontSize: 12, color: "#9ca3af", marginTop: 2 }}>
+                              {log.created_at}
+                            </Text>
+                          ) : null}
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                )}
               </ScrollView>
             ) : null}
           </View>

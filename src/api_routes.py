@@ -394,6 +394,14 @@ async def detalhe_fatura(invoice_id: str):
         "boleto_linha_digitavel": bank_slip.get("digitable_line"),
         "pix_qrcode": pix.get("qrcode_text"),
         "custom_variables": invoice.get("custom_variables", []),
+        "logs": [
+            {
+                "description": l.get("description"),
+                "notes": l.get("notes"),
+                "created_at": l.get("created_at"),
+            }
+            for l in (invoice.get("logs") or [])
+        ],
         "nfse": nfse_info,
         "nfse_emitida": nfse_emitida,
     }
