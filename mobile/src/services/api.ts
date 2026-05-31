@@ -62,6 +62,7 @@ async function request<T = any>(
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
+      cache: "no-store", // sempre busca dados frescos (sem cache do navegador/PWA)
     });
 
     const data = await response.json().catch(() => null);

@@ -14,6 +14,7 @@ import {
   Platform,
 } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { useFocusEffect } from "@react-navigation/native";
 import {
   getFaturas,
   getFatura,
@@ -152,9 +153,12 @@ export default function FaturasScreen() {
     setLoading(false);
   }, [filtro, buscaDebounced, ano, mes]);
 
-  useEffect(() => {
-    fetchFaturas();
-  }, [fetchFaturas]);
+  // Recarrega ao focar a tela (ex: voltar de outra aba) e quando os filtros mudam.
+  useFocusEffect(
+    useCallback(() => {
+      fetchFaturas();
+    }, [fetchFaturas])
+  );
 
   // Pull-to-refresh customizado (web). No APK nativo, o RefreshControl abaixo
   // continua cuidando do gesto.
@@ -217,11 +221,11 @@ export default function FaturasScreen() {
       async () => {
         const res = await cancelarFatura(id);
         if (res.data?.sucesso) {
-          alertMsg("Sucesso", "Fatura cancelada");
+          alertMsg("Sucesso", res.data?.mensagem || "Fatura cancelada");
           setModalVisible(false);
           fetchFaturas();
         } else {
-          alertMsg("Erro", res.error || "Falha ao cancelar");
+          alertMsg("Erro", res.data?.mensagem || res.error || "Falha ao cancelar");
         }
       },
     );

@@ -34,7 +34,15 @@ PAD_RATIO = 0.16     # margem ao redor do logo (16% de cada lado)
 
 def main() -> None:
     print(f"Baixando logo: {LOGO_URL}")
-    resp = requests.get(LOGO_URL, timeout=30)
+    # User-Agent de navegador: o site (WordPress) responde 406 sem isso.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": "image/avif,image/webp,image/png,image/*,*/*;q=0.8",
+    }
+    resp = requests.get(LOGO_URL, headers=headers, timeout=30)
     resp.raise_for_status()
     logo = Image.open(io.BytesIO(resp.content)).convert("RGBA")
     print(f"Logo original: {logo.width}x{logo.height}")

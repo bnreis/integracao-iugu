@@ -470,7 +470,24 @@ async def cancelar_fatura(invoice_id: str):
             result = client.cancel_invoice(invoice_id)
     except IuguAPIError as e:
         raise HTTPException(502, f"Erro Iugu: {e.message}")
-    return {"sucesso": True, "id": invoice_id, "status": result.get("status")}
+
+    status_final = result.get("status")
+    sucesso = status_final == "canceled"
+    if not sucesso:
+        logger.warning(
+            f"Cancelamento da fatura {invoice_id} nao refletiu: status Iugu = {status_final!r}"
+        )
+    return {
+        "sucesso": sucesso,
+        "id": invoice_id,
+        "status": status_final,
+        "mensagem": (
+            "Fatura cancelada"
+            if sucesso
+            else f"A Iugu nao cancelou (status atual: {status_final}). "
+            "Boletos ja registrados no banco nao podem ser cancelados pela API."
+        ),
+    }
 
 
 # ============================================================
