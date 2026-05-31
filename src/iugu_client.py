@@ -311,6 +311,12 @@ class IuguClient:
         logger.info(f"Estornando fatura {invoice_id}")
         return self._request("POST", f"/v1/invoices/{invoice_id}/refund", json=payload)
 
+    def send_invoice_email(self, invoice_id: str) -> dict[str, Any]:
+        """Reenvia o e-mail da fatura (boleto/cobranca) ao e-mail vinculado a ela.
+        Endpoint nativo da Iugu: POST /v1/invoices/{id}/send_email."""
+        logger.info(f"Reenviando e-mail da fatura {invoice_id}")
+        return self._request("POST", f"/v1/invoices/{invoice_id}/send_email")
+
     # -----------------------------
     # Clientes
     # -----------------------------

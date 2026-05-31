@@ -542,36 +542,46 @@ async def emitir_nfse_endpoint(invoice_id: str):
 
 @api_router.post("/nfse/{invoice_id}/reenviar")
 async def reenviar_nfse_email(invoice_id: str):
-    """Reenvia o e-mail da NFS-e para uma fatura ja processada."""
+    """Reenvia o e-mail da fatura.
+
+    - Se houver NFS-e emitida -> reenvia a NFS-e (com anexos) via SMTP.
+    - Caso contrario (cobranca/boleto) -> usa o envio nativo da Iugu
+      (POST /v1/invoices/{id}/send_email).
+    """
     try:
         with IuguClient() as client:
             invoice = client.get_invoice(invoice_id)
     except IuguAPIError as e:
         raise HTTPException(502, f"Erro ao buscar fatura: {e.message}")
 
-    from .iugu_client import extract_cnpj_from_invoice
-    cnpj = extract_cnpj_from_invoice(invoice)
-    if not cnpj:
-        raise HTTPException(400, "CNPJ nao identificavel na fatura")
-
-    repo = get_repo()
-    empresa = repo.buscar_por_cnpj(cnpj)
-    if not empresa:
-        raise HTTPException(404, f"CNPJ {cnpj} nao encontrado no cadastro")
-
     nfse_info = _buscar_nfse_da_fatura(invoice_id)
-    if not nfse_info:
-        raise HTTPException(404, "Nenhuma NFS-e encontrada para esta fatura")
 
-    try:
-        from .email_nfse import enviar_nfse_email
-        sucesso = enviar_nfse_email(empresa, nfse_info)
+    # Caso 1 -- fatura com NFS-e: reenvia a NFS-e (com anexos) pelo nosso SMTP.
+    if nfse_info:
+        from .iugu_client import extract_cnpj_from_invoice
+        cnpj = extract_cnpj_from_invoice(invoice)
+        empresa = get_repo().buscar_por_cnpj(cnpj) if cnpj else None
+        if not empresa:
+            raise HTTPException(404, f"CNPJ {cnpj} nao encontrado no cadastro")
+        try:
+            from .email_nfse import enviar_nfse_email
+            sucesso = enviar_nfse_email(empresa, nfse_info)
+        except ImportError:
+            raise HTTPException(500, "Modulo de e-mail nao disponivel")
         if sucesso:
-            return {"sucesso": True, "mensagem": f"E-mail reenviado para {empresa.email}"}
-        else:
-            return {"sucesso": False, "mensagem": "Falha ao enviar e-mail -- verifique os logs"}
-    except ImportError:
-        raise HTTPException(500, "Modulo de e-mail nao disponivel")
+            return {"sucesso": True, "mensagem": f"NF-e reenviada para {empresa.email}"}
+        return {"sucesso": False, "mensagem": "Falha ao enviar a NF-e por e-mail -- verifique os logs"}
+
+    # Caso 2 -- sem NFS-e: reenvia a cobranca/boleto pelo envio nativo da Iugu.
+    try:
+        with IuguClient() as client:
+            client.send_invoice_email(invoice_id)
+    except IuguAPIError as e:
+        raise HTTPException(502, f"Erro ao reenviar cobranca: {e.message}")
+    return {
+        "sucesso": True,
+        "mensagem": f"Cobranca reenviada para {invoice.get('email') or 'o cliente'}",
+    }
 
 
 # ============================================================
