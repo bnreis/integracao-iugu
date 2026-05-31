@@ -423,7 +423,7 @@ export default function FaturasScreen() {
             {actionLoading && !detalhe ? (
               <ActivityIndicator size="large" color="#1a56db" />
             ) : detalhe ? (
-              <ScrollView>
+              <ScrollView showsVerticalScrollIndicator={false}>
                 <Text style={styles.modalTitle}>Fatura</Text>
                 <StatusBadge status={detalhe.status} />
 
