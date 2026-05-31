@@ -7,6 +7,8 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
       "backgroundColor": "#1a56db"
     },
     "android": {
