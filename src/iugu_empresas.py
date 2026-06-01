@@ -331,8 +331,10 @@ class EmpresasRepository:
                             if not cust:
                                 continue
                             emp = customer_para_empresa(cust)
-                            if emp:
-                                self._empresas[emp.cnpj] = emp
+                            if emp and emp.customer_id:
+                                # Indexado por customer_id (chave unica): um mesmo
+                                # CNPJ pode ter varios clientes/departamentos distintos.
+                                self._empresas[emp.customer_id] = emp
         except IuguAPIError as e:
             logger.error(f"Erro ao carregar customers da Iugu: {e.message}")
             raise
@@ -341,12 +343,23 @@ class EmpresasRepository:
         logger.info(f"Iugu carregada: {len(self._empresas)} empresas (CNPJ)")
 
     def buscar_por_cnpj(self, cnpj: str) -> Optional[Empresa]:
-        """Retorna a empresa pelo CNPJ (so ativas). None se nao encontrada."""
+        """Retorna a PRIMEIRA empresa ativa com este CNPJ. None se nao houver.
+
+        Atencao: um CNPJ pode ter varios clientes/departamentos. Para precisao,
+        use buscar_por_customer_id(). Este metodo existe para compatibilidade.
+        """
         self.carregar()
-        empresa = self._empresas.get(normalizar_cnpj(cnpj))
-        if empresa and empresa.ativo:
-            return empresa
+        alvo = normalizar_cnpj(cnpj)
+        for emp in self._empresas.values():
+            if emp.cnpj == alvo and emp.ativo:
+                return emp
         return None
+
+    def listar_por_cnpj(self, cnpj: str) -> list[Empresa]:
+        """Retorna TODAS as empresas (departamentos) ativas com este CNPJ."""
+        self.carregar()
+        alvo = normalizar_cnpj(cnpj)
+        return [e for e in self._empresas.values() if e.cnpj == alvo and e.ativo]
 
     def listar_ativas(self) -> list[Empresa]:
         """Retorna todas as empresas ativas."""
@@ -363,12 +376,12 @@ class EmpresasRepository:
         return self.buscar_por_cnpj(cnpj) is not None
 
     def buscar_por_customer_id(self, customer_id: str) -> Optional[Empresa]:
-        """Busca empresa pelo ID do customer na Iugu."""
+        """Busca empresa pelo customer_id (chave unica). None se nao existir.
+
+        Retorna mesmo se inativa (para edicao/consulta direta de um departamento).
+        """
         self.carregar()
-        for emp in self._empresas.values():
-            if emp.customer_id == customer_id and emp.ativo:
-                return emp
-        return None
+        return self._empresas.get(customer_id)
 
 
 # ============================================================

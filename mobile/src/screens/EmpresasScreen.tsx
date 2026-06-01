@@ -345,7 +345,7 @@ export default function EmpresasScreen({ navigation }: any) {
         <PullIndicator pull={pull} refreshing={loading} />
         <FlatList
           data={empresasFiltradas}
-          keyExtractor={(item) => item.cnpj}
+          keyExtractor={(item) => item.customer_id || item.cnpj}
           renderItem={renderEmpresa}
           onScroll={(e) => {
             scrollTopRef.current = e.nativeEvent.contentOffset.y;
