@@ -28,11 +28,12 @@ from __future__ import annotations
 import secrets
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 
+from .auth import usuario_autenticado
 from .config import settings
 from .iugu_client import IuguAPIError, IuguClient, extract_cnpj_from_invoice
 from .iugu_empresas import EmpresasRepository
@@ -83,9 +84,9 @@ async def health():
     }
 
 
-@app.get("/empresas")
+@app.get("/empresas", dependencies=[Depends(usuario_autenticado)])
 async def listar_empresas():
-    """Lista as empresas autorizadas (útil para debug)."""
+    """Lista as empresas autorizadas (útil para debug). Requer JWT."""
     try:
         repo = get_repo()
         empresas = [e.to_dict() for e in repo.listar_ativas()]
@@ -147,10 +148,10 @@ async def receber_webhook_iugu(request: Request):
     return JSONResponse(resultado)
 
 
-@app.post("/processar/{invoice_id}")
+@app.post("/processar/{invoice_id}", dependencies=[Depends(usuario_autenticado)])
 async def processar_manualmente(invoice_id: str):
     """
-    Reprocessa manualmente uma fatura.
+    Reprocessa manualmente uma fatura. Requer JWT.
     Útil para testes e reprocessamento quando o webhook falhou.
     """
     return await processar_pagamento(invoice_id)
