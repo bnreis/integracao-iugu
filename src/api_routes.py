@@ -166,9 +166,14 @@ async def dashboard(
     except IuguAPIError as e:
         raise HTTPException(502, f"Erro ao consultar Iugu: {e.message}")
 
-    items_criadas_hoje = criadas_hoje.get("items", [])
+    # "Faturado"/"criadas" desconsidera CANCELADAS (boleto cancelado nao e
+    # faturamento real, e nao deve entrar na taxa de conversao).
+    def _nao_cancelada(f):
+        return f.get("status") != "canceled"
+
+    items_criadas_hoje = [f for f in criadas_hoje.get("items", []) if _nao_cancelada(f)]
     items_pagas_hoje = pagas_hoje.get("items", [])
-    items_criadas_mes = criadas_mes.get("items", [])
+    items_criadas_mes = [f for f in criadas_mes.get("items", []) if _nao_cancelada(f)]
     items_pagas_mes = pagas_mes.get("items", [])
     items_pendentes = pendentes.get("items", [])
     items_vencidas = vencidas.get("items", [])
@@ -183,7 +188,8 @@ async def dashboard(
     total_pendente = soma_cents(items_pendentes)
     total_vencido = soma_cents(items_vencidas)
 
-    qtd_criadas_mes = criadas_mes.get("totalItems", len(items_criadas_mes))
+    # Quantidade de criadas = sem canceladas (usa a lista ja filtrada)
+    qtd_criadas_mes = len(items_criadas_mes)
     qtd_pagas_mes = pagas_mes.get("totalItems", len(items_pagas_mes))
     taxa_conversao = round((qtd_pagas_mes / qtd_criadas_mes * 100), 1) if qtd_criadas_mes > 0 else 0.0
 
