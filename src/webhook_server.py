@@ -25,6 +25,7 @@ Para expor publicamente (webhooks + app):
 """
 from __future__ import annotations
 
+import secrets
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -40,12 +41,17 @@ app = FastAPI(
     title="Integração Iugu + NFS-e DF",
     description="Webhooks Iugu + API de gestão para app Android",
     version="0.3.0",
+    # Documentação interativa desligada em produção (não expor o schema da API).
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
-# --- CORS (permite o app mobile acessar a API) ---
+# --- CORS (restrito ao domínio do painel; configurável via CORS_ORIGINS no .env) ---
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, restringir ao domínio/IP do app
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,11 +113,12 @@ async def receber_webhook_iugu(request: Request):
     # Valida token se configurado (enviado pela Iugu como query param ou header)
     if settings.iugu_webhook_token:
         token_recebido = (
-            request.query_params.get("token")
-            or request.headers.get("X-Iugu-Token")
+            request.headers.get("X-Iugu-Token")
+            or request.query_params.get("token")
             or ""
         )
-        if token_recebido != settings.iugu_webhook_token:
+        # Comparação em tempo constante (evita timing attack na validação do token).
+        if not secrets.compare_digest(token_recebido, settings.iugu_webhook_token):
             logger.warning(f"Webhook rejeitado — token inválido: {token_recebido[:10]}...")
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,

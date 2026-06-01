@@ -15,11 +15,13 @@ Configuração no .env:
 from __future__ import annotations
 
 import secrets
+import time as _time
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from loguru import logger
 from pydantic import BaseModel
@@ -50,13 +52,55 @@ _security = HTTPBearer(auto_error=False)
 
 
 def _verificar_credenciais(usuario: str, senha: str) -> bool:
-    """Verifica se usuário e senha batem com o configurado no .env."""
+    """Verifica se usuário e senha batem com o configurado no .env.
+
+    Usa secrets.compare_digest (comparação em tempo constante) para evitar
+    timing attacks na descoberta de usuário/senha.
+    """
     if not settings.api_senha:
         logger.warning(
             "API_SENHA não configurada no .env — login desabilitado por segurança"
         )
         return False
-    return usuario == settings.api_usuario and senha == settings.api_senha
+    usuario_ok = secrets.compare_digest(usuario, settings.api_usuario)
+    senha_ok = secrets.compare_digest(senha, settings.api_senha)
+    return usuario_ok and senha_ok
+
+
+# --- Rate limiting do login (in-memory, sliding window por IP) ---
+# Single-worker uvicorn → dict em memória é suficiente. Reinicia o contador
+# a cada restart do serviço (aceitável para uso single-operador).
+_LOGIN_MAX_TENTATIVAS = 5
+_LOGIN_JANELA_SEG = 60
+_login_tentativas: dict[str, deque] = defaultdict(deque)
+
+
+def client_ip(request: Request) -> str:
+    """IP real do cliente. Atrás do Apache, usa X-Forwarded-For (1º IP da cadeia)."""
+    xff = request.headers.get("X-Forwarded-For")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _verificar_rate_limit_login(ip: str) -> None:
+    """Bloqueia (429) após _LOGIN_MAX_TENTATIVAS dentro da janela. Registra a tentativa."""
+    agora = _time.time()
+    tentativas = _login_tentativas[ip]
+    while tentativas and agora - tentativas[0] > _LOGIN_JANELA_SEG:
+        tentativas.popleft()
+    if len(tentativas) >= _LOGIN_MAX_TENTATIVAS:
+        logger.warning(f"Rate limit de login atingido para ip={ip}")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Muitas tentativas de login. Aguarde 1 minuto e tente novamente.",
+        )
+    tentativas.append(agora)
+
+
+def _resetar_rate_limit_login(ip: str) -> None:
+    """Zera o contador após login bem-sucedido."""
+    _login_tentativas.pop(ip, None)
 
 
 def gerar_token(usuario: str) -> LoginResponse:
@@ -74,15 +118,17 @@ def gerar_token(usuario: str) -> LoginResponse:
     )
 
 
-def login(request: LoginRequest) -> LoginResponse:
-    """Autentica o usuário e retorna um token JWT."""
+def login(request: LoginRequest, ip: str = "?") -> LoginResponse:
+    """Autentica o usuário e retorna um token JWT (com rate limiting por IP)."""
+    _verificar_rate_limit_login(ip)
     if not _verificar_credenciais(request.usuario, request.senha):
-        logger.warning(f"Tentativa de login falhou: usuario={request.usuario}")
+        logger.warning(f"Tentativa de login falhou: usuario={request.usuario} ip={ip}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuário ou senha inválidos",
         )
-    logger.info(f"Login bem-sucedido: {request.usuario}")
+    _resetar_rate_limit_login(ip)
+    logger.info(f"Login bem-sucedido: {request.usuario} ip={ip}")
     return gerar_token(request.usuario)
 
 

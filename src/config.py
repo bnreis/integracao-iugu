@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     api_senha: str = Field("", description="Senha de login da API de gestão")
     api_jwt_secret: str = Field("", description="Chave secreta para assinar tokens JWT")
     api_jwt_expira_horas: int = Field(72, description="Validade do token JWT em horas")
+    # Origens permitidas no CORS (separadas por vírgula). Em produção, restrinja ao
+    # domínio do painel. Use "*" só em desenvolvimento.
+    cors_origins: str = Field(
+        "https://iugu.megasuporte.com",
+        description="Origens permitidas no CORS (separadas por vírgula)",
+    )
 
     # --- NFS-e DF ---
     nfse_inscricao_municipal: str = Field("", description="Inscrição municipal DF")

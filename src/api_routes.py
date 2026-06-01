@@ -29,11 +29,18 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
 from pydantic import BaseModel, Field as PydField
 
-from .auth import LoginRequest, LoginResponse, UsuarioAutenticado, login, usuario_autenticado
+from .auth import (
+    LoginRequest,
+    LoginResponse,
+    UsuarioAutenticado,
+    client_ip,
+    login,
+    usuario_autenticado,
+)
 from .config import settings
 from .iugu_client import IuguAPIError, IuguClient
 from .iugu_empresas import (
@@ -62,9 +69,9 @@ api_router = APIRouter(
 # AUTH
 # ============================================================
 @auth_router.post("/login", response_model=LoginResponse)
-async def endpoint_login(request: LoginRequest):
-    """Autentica e retorna um token JWT."""
-    return login(request)
+async def endpoint_login(credenciais: LoginRequest, request: Request):
+    """Autentica e retorna um token JWT (rate-limited por IP)."""
+    return login(credenciais, ip=client_ip(request))
 
 
 # ============================================================
