@@ -285,7 +285,31 @@ crontab -u iugu -e
 
 ---
 
-## Fase 8 — Operação e segurança (a detalhar)
+## Fase 8 — Operação e segurança
+
+### Hardening aplicado (auditoria OWASP API Top 10 — 2026-06-01) ✅
+
+Análise de vulnerabilidade feita com a skill `conducting-api-security-testing`. Correções **já em produção** (validadas com `curl`):
+
+| Item | Onde | Validação |
+|---|---|---|
+| CORS restrito ao domínio (era `*`) | `src/config.py` (`CORS_ORIGINS`) + `src/webhook_server.py` | default = `https://iugu.megasuporte.com`; apps nativos não usam CORS |
+| Rate limiting no login (5/min por IP, lê `X-Forwarded-For`) | `src/auth.py` | 6ª tentativa → `429` |
+| `secrets.compare_digest` no login e no token de webhook (anti timing-attack) | `src/auth.py`, `src/webhook_server.py` | — |
+| `/docs`, `/redoc`, `/openapi.json` desligados | `src/webhook_server.py` (`docs_url=None` etc.) | uvicorn → `404` |
+| JWT obrigatório em `/empresas` e `/processar/{id}` (eram públicos) | `src/webhook_server.py` (`dependencies=[Depends(usuario_autenticado)]`) | sem token → `401` |
+| HSTS + `X-Content-Type-Options` + `X-Frame-Options` + `Referrer-Policy` | vhost Apache `:443` (`mod_headers`) | `curl -sI` mostra os 4 headers |
+
+> O vhost só faz proxy de `/api/`, `/webhook/` e `/health`. `/empresas`, `/processar`, `/docs` **não são proxiados** — mas foram protegidos no app como defesa em profundidade (caso um `ProxyPass` futuro os exponha).
+>
+> HSTS **sem `preload`** de propósito: `megasuporte.com` é domínio compartilhado (PBX Asterisk). `includeSubDomains` só afeta `*.iugu.megasuporte.com`.
+
+**Pendências do laudo que NÃO são código (prioridade):**
+1. 🔴 **Rotacionar credenciais** — token de webhook (re-vazou no chat), senha do certificado A1 (`mega10` é fraca), senha SMTP. Sem isso, os fixes de código não fecham o buraco maior.
+2. 🟡 Confirmar `API_JWT_SECRET` forte e fixo no `.env` da VPS (senão tokens caem a cada restart).
+3. 🟡 **AMI/SIP do Asterisk** expostos em `0.0.0.0` sem firewall na mesma VPS — maior risco *da máquina* (fraude de discagem). Tratar com allowlist de IP, fora do escopo deste projeto.
+
+### Operação
 
 - Renovação automática do certbot (timer já vem ativo) — testar com `certbot renew --dry-run`
 - Backup diário de `empresas_autorizadas.xlsx` e `nfse_emitidas/`
