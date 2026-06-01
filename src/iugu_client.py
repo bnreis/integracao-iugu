@@ -79,10 +79,15 @@ class IuguClient:
                 logger.error(f"Erro de rede ao chamar Iugu: {exc}")
                 raise IuguAPIError(0, f"Falha de conexão com a Iugu: {exc}") from exc
 
-            # Retry automático em caso de rate limit (429)
-            if response.status_code == 429 and attempt < _retries - 1:
+            # Retry automático com backoff: rate limit (429) e erros transitorios
+            # do servidor da Iugu (5xx) — um 500 momentaneo nao deve derrubar o
+            # lote diario de boletos nem o webhook.
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < _retries - 1:
                 wait = 2 ** attempt  # 1s, 2s, 4s
-                logger.warning(f"Rate limit Iugu (429) — aguardando {wait}s antes de tentar novamente (tentativa {attempt + 1}/{_retries})")
+                logger.warning(
+                    f"Iugu retornou {response.status_code} — aguardando {wait}s e tentando de novo "
+                    f"(tentativa {attempt + 1}/{_retries})"
+                )
                 _time.sleep(wait)
                 continue
 
