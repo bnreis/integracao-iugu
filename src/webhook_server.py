@@ -101,6 +101,25 @@ async def listar_empresas():
 # ============================================================
 # Webhook principal
 # ============================================================
+# WEB-010: stages de falha RECUPERÁVEL (erro transitório upstream) → 5xx para a
+# Iugu re-tentar o webhook. Demais resultados são terminais/sucesso → 200.
+_STAGES_RECUPERAVEIS = {"fetch_invoice", "load_empresas", "emitir_nfse"}
+
+
+def _status_http_webhook(resultado: dict[str, Any]) -> int:
+    """Mapeia o resultado de processar_pagamento para o status HTTP do webhook.
+
+    - sucesso (emitida/ignorada/pulada) → 200
+    - falha terminal (status≠pago, sem CNPJ, duplicata) → 200 (não re-tentar)
+    - falha recuperável (Iugu/cadastro/emissão indisponível) → 502 (Iugu re-tenta)
+    """
+    if resultado.get("success"):
+        return 200
+    if resultado.get("stage") in _STAGES_RECUPERAVEIS:
+        return status.HTTP_502_BAD_GATEWAY
+    return 200
+
+
 @app.post("/webhook/iugu")
 async def receber_webhook_iugu(request: Request):
     """
@@ -143,9 +162,11 @@ async def receber_webhook_iugu(request: Request):
     if not invoice_id:
         raise HTTPException(400, "invoice_id ausente no payload")
 
-    # Processa em background (resposta rápida para a Iugu não dar timeout)
     resultado = await processar_pagamento(invoice_id)
-    return JSONResponse(resultado)
+    # WEB-010: devolve 5xx em falha RECUPERÁVEL para a Iugu re-tentar o webhook.
+    # Casos terminais (CNPJ não autorizado, emitir_nf=False, duplicata, status≠pago)
+    # seguem como 200 — não faz sentido a Iugu re-tentar isso.
+    return JSONResponse(resultado, status_code=_status_http_webhook(resultado))
 
 
 @app.post("/processar/{invoice_id}", dependencies=[Depends(usuario_autenticado)])
@@ -369,14 +390,34 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
 
         resultado_nfse = await emitir_nfse(invoice=invoice, empresa=empresa)
 
-        if resultado_nfse.get("sucesso"):
-            try:
-                from .email_nfse import enviar_nfse_email
-                enviar_nfse_email(empresa, resultado_nfse)
-            except ImportError:
-                logger.warning("Módulo email_nfse não disponível — NFS-e não enviada por e-mail")
-            except Exception as email_exc:
-                logger.error(f"Falha ao enviar NFS-e por e-mail: {email_exc}")
+        # WEB-011: rejeição da NFS-e (sucesso=False SEM exceção — ex.: erro de schema,
+        # IM não liberada) NÃO pode ser rotulada como "emitida". É falha terminal
+        # (re-tentar não resolve rejeição), mas precisa de registro honesto + alerta.
+        if not resultado_nfse.get("sucesso"):
+            mensagens = resultado_nfse.get("mensagens") or resultado_nfse.get("mensagem_erro")
+            logger.error(
+                f"❌ NFS-e REJEITADA para fatura {invoice_id} "
+                f"(CNPJ {cnpj}, {empresa.razao_social}): {mensagens}"
+            )
+            return {
+                "success": False,
+                # stage terminal — NÃO está em _STAGES_RECUPERAVEIS → HTTP 200 (não re-tenta).
+                "stage": "nfse_rejeitada",
+                "invoice_id": invoice_id,
+                "cnpj": cnpj,
+                "empresa": empresa.razao_social,
+                "acao": "nfse_rejeitada",
+                "nfse": resultado_nfse,
+            }
+
+        # Sucesso: envia o e-mail e retorna como emitida.
+        try:
+            from .email_nfse import enviar_nfse_email
+            enviar_nfse_email(empresa, resultado_nfse)
+        except ImportError:
+            logger.warning("Módulo email_nfse não disponível — NFS-e não enviada por e-mail")
+        except Exception as email_exc:
+            logger.error(f"Falha ao enviar NFS-e por e-mail: {email_exc}")
 
         return {
             "success": True,
