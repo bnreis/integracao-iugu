@@ -644,8 +644,24 @@ def _envelopar_soap_abrasf(xml_rps_assinado: str) -> str:
     Args:
         xml_rps_assinado: GerarNfseEnvio já assinado (Signature embutida no Rps).
     """
+    return _envelopar_soap_abrasf_operacao(xml_rps_assinado, ABRASF_OPERACAO)
+
+
+def _envelopar_soap_abrasf_operacao(xml_dados: str, operacao: str) -> str:
+    """Embrulha um XML de dados ABRASF 2.04 no envelope SOAP 1.1 para `operacao`.
+
+    Generaliza `_envelopar_soap_abrasf` (que fica como atalho para GerarNfse): o
+    mesmo padrão nfseCabecMsg + nfseDadosMsg vale para todas as operações do WSDL
+    ISSnet (GerarNfse, ConsultarUrlNfse, etc.), mudando só o nome do elemento da
+    operação no corpo. O conteúdo de nfseDadosMsg é o XML aninhado (sem CDATA);
+    se o ISSnet exigir CDATA, trocar nos dois ramos comentados abaixo.
+
+    Args:
+        xml_dados: XML de dados ABRASF (ex.: GerarNfseEnvio, ConsultarUrlNfseEnvio).
+        operacao: nome da operação SOAP (ex.: "GerarNfse", "ConsultarUrlNfse").
+    """
     # Remove declaração XML do corpo interno (não pode aparecer aninhada).
-    corpo = re.sub(r'<\?xml[^?]*\?>\s*', '', xml_rps_assinado).strip()
+    corpo = re.sub(r'<\?xml[^?]*\?>\s*', '', xml_dados).strip()
 
     cabecalho = (
         f'<cabecalho versao="{ABRASF_VERSAO_DADOS}" xmlns="{ABRASF_SCHEMA_NS}">'
@@ -662,10 +678,10 @@ def _envelopar_soap_abrasf(xml_rps_assinado: str) -> str:
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">\n'
         '  <soap:Body>\n'
-        f'    <{ABRASF_OPERACAO} xmlns="{ABRASF_SERVICE_NS}">\n'
+        f'    <{operacao} xmlns="{ABRASF_SERVICE_NS}">\n'
         f'      <nfseCabecMsg>{cabec_content}</nfseCabecMsg>\n'
         f'      <nfseDadosMsg>{dados_content}</nfseDadosMsg>\n'
-        f'    </{ABRASF_OPERACAO}>\n'
+        f'    </{operacao}>\n'
         '  </soap:Body>\n'
         '</soap:Envelope>\n'
     )
@@ -759,17 +775,37 @@ def _enviar_soap_abrasf(envelope: str, endpoint: str) -> tuple[str, int]:
     Returns:
         (corpo_da_resposta, status_code_http)
     """
+    return _enviar_soap_abrasf_operacao(envelope, endpoint, ABRASF_SOAP_ACTION)
+
+
+def _enviar_soap_abrasf_operacao(
+    envelope: str, endpoint: str, soap_action: str
+) -> tuple[str, int]:
+    """Envia um envelope SOAP ABRASF ao ISSnet via httpx com mTLS, com SOAPAction custom.
+
+    Generaliza `_enviar_soap_abrasf` (atalho para GerarNfse) — o único parâmetro que
+    muda entre operações é o header SOAPAction. Reutiliza `_pkcs12_to_pem_tempfiles`
+    (mesmo certificado A1) e remove os PEMs temporários no finally.
+
+    Args:
+        envelope: corpo SOAP completo (string UTF-8).
+        endpoint: URL do webservice ABRASF.
+        soap_action: valor do header SOAPAction (ex.: ABRASF_SOAP_ACTION_CONSULTA_URL).
+
+    Returns:
+        (corpo_da_resposta, status_code_http)
+    """
     cert_path = Path(settings.nfse_certificado_path)
     senha = settings.nfse_certificado_senha
     cert_file, key_file = _pkcs12_to_pem_tempfiles(cert_path, senha)
 
     headers = {
         "Content-Type": "text/xml; charset=utf-8",
-        "SOAPAction": f'"{ABRASF_SOAP_ACTION}"',
+        "SOAPAction": f'"{soap_action}"',
     }
     try:
         logger.info(
-            f"Enviando RPS (SOAP — {ABRASF_OPERACAO}, ABRASF 2.04) para {endpoint}"
+            f"Enviando SOAP (action={soap_action}, ABRASF 2.04) para {endpoint}"
         )
         with httpx.Client(
             cert=(str(cert_file), str(key_file)) if cert_file.exists() else None,
@@ -898,6 +934,321 @@ def _parsear_resposta_abrasf(xml_resposta: str) -> dict[str, Any]:
         "mensagens_alerta": mensagens_alerta,
         "mensagem_erro": mensagem_erro,
     }
+
+
+# =============================================================================
+# ConsultarUrlNfse — operação EXCLUSIVA do ISSnet DF (ABRASF 2.04)
+# =============================================================================
+# Obtém a URL oficial de visualização/impressão de uma NFS-e já emitida (e, a
+# partir dela, o PDF/DANFSE oficial). Esta operação NÃO existe no XSD/WSDL
+# genérico do ABRASF (docs/exemplos_oficiais/abrasf204/) — só no ISSnet DF
+# (df.issnetonline.com.br/webservicenfse204/nfse.asmx?wsdl). A operação SOAP é
+# "ConsultarUrlNfse" (confirmada respondendo), mas o CONTEÚDO do nfseDadosMsg usa
+# o schema PRÓPRIO do ISSnet `ConsultarUrlVisualizacaoNfseEnvio` (XSDs oficiais,
+# elementFormDefault=qualified) — não o leiaute genérico ABRASF, que dava E160.
+# Pontos ainda passíveis de ajuste pós-teste:
+#   - se a consulta exige ou não assinatura XML (não exige hoje);
+#   - o nome do elemento de URL na resposta (UrlVisualizacaoNfse / Url) — a
+#     heurística do parser tolera localname com "url" ou texto começando em http.
+# As constantes (namespaces + elemento raiz) ficam no topo da seção.
+# =============================================================================
+
+# Operação ISSnet DF para obter a URL oficial da NFS-e.
+# IMPORTANTE: a OPERAÇÃO SOAP continua "ConsultarUrlNfse" (já confirmamos que esse
+# endpoint/SOAPAction responde). O que muda é só o SCHEMA INTERNO do nfseDadosMsg:
+# o conteúdo NÃO é o leiaute genérico ABRASF (que dava E160), e sim o schema PRÓPRIO
+# do ISSnet `ConsultarUrlVisualizacaoNfseEnvio`.
+ABRASF_OPERACAO_CONSULTA_URL = "ConsultarUrlNfse"
+# SOAPAction da operação (mesmo binding document/literal das demais operações).
+ABRASF_SOAP_ACTION_CONSULTA_URL = f"{ABRASF_SERVICE_NS}/{ABRASF_OPERACAO_CONSULTA_URL}"
+
+# Namespaces PRÓPRIOS do ISSnet para a consulta de URL de visualização (XSDs
+# oficiais, elementFormDefault=qualified). NÃO confundir com ABRASF_SCHEMA_NS.
+#   - Namespace do ENVIO: raiz + filhos diretos (Prestador, Numero, Codigo...).
+#   - Namespace tipos_complexos: CpfCnpj / Cnpj / InscricaoMunicipal (prefixo tc).
+ISSNET_CONSULTA_URL_ENVIO_NS = (
+    "http://www.issnetonline.com.br/webserviceabrasf/vsd/"
+    "servico_consultar_url_visualizacao_nfse_envio.xsd"
+)
+ISSNET_TIPOS_COMPLEXOS_NS = (
+    "http://www.issnetonline.com.br/webserviceabrasf/vsd/tipos_complexos.xsd"
+)
+# Nome do elemento raiz do nfseDadosMsg (schema próprio do ISSnet).
+ISSNET_CONSULTA_URL_ELEMENTO_RAIZ = "ConsultarUrlVisualizacaoNfseEnvio"
+
+
+def _montar_xml_consultar_url_nfse(numero_nfse: str) -> str:
+    """Monta o XML `ConsultarUrlVisualizacaoNfseEnvio` (schema PRÓPRIO do ISSnet DF).
+
+    Este é o leiaute que vai DENTRO do nfseDadosMsg. A versão anterior usava o
+    namespace/elemento genérico do ABRASF (`ConsultarUrlNfseEnvio` no NS
+    `http://www.abrasf.org.br/nfse.xsd`), e o ISSnet rejeitava com E160. O schema
+    correto é o próprio do ISSnet, confirmado nos XSDs oficiais (elementFormDefault
+    = qualified), com DOIS namespaces distintos:
+
+        ConsultarUrlVisualizacaoNfseEnvio            (NS de ENVIO — xmlns default)
+          ├── Prestador                              (NS de ENVIO)
+          │     ├── tc:CpfCnpj > tc:Cnpj             (NS tipos_complexos)  ← CNPJ prestador
+          │     └── tc:InscricaoMunicipal           (NS tipos_complexos)  ← IM prestador
+          ├── Numero                                 (NS de ENVIO)         ← número da NFS-e (ex.: "408")
+          └── CodigoTributacaoMunicipio              (NS de ENVIO)         ← settings.nfse_codigo_trib_municipal (=1071)
+
+    Regras de namespace (críticas — foi o que causou o E160):
+      - Raiz + Prestador + Numero + CodigoTributacaoMunicipio → NS de ENVIO
+        (ISSNET_CONSULTA_URL_ENVIO_NS), declarado como xmlns default.
+      - CpfCnpj / Cnpj / InscricaoMunicipal → NS tipos_complexos
+        (ISSNET_TIPOS_COMPLEXOS_NS), declarado com prefixo `tc`.
+
+    NÃO assinamos: esta consulta dispensa XMLDSig.
+
+    Args:
+        numero_nfse: número da NFS-e a consultar (ex.: "408").
+
+    Returns:
+        XML como string UTF-8 sem declaração XML (pronto para envelopar).
+    """
+    from lxml import etree
+
+    ENVIO = ISSNET_CONSULTA_URL_ENVIO_NS
+    TC = ISSNET_TIPOS_COMPLEXOS_NS
+
+    def _el_envio(parent, tag, text=None):
+        # Elemento no namespace de ENVIO (xmlns default da raiz).
+        e = etree.SubElement(parent, f"{{{ENVIO}}}{tag}")
+        if text is not None:
+            e.text = str(text)
+        return e
+
+    def _el_tc(parent, tag, text=None):
+        # Elemento no namespace tipos_complexos (prefixo tc).
+        e = etree.SubElement(parent, f"{{{TC}}}{tag}")
+        if text is not None:
+            e.text = str(text)
+        return e
+
+    cnpj_prestador = _so_digitos(settings.nfse_cnpj_prestador)
+    im_prestador = _so_digitos(settings.nfse_inscricao_municipal)
+    cod_trib_mun = str(settings.nfse_codigo_trib_municipal).strip()
+
+    # nsmap: default = NS de envio; tc = tipos_complexos. Declarar ambos na raiz
+    # garante que o lxml serialize CpfCnpj/Cnpj/InscricaoMunicipal com prefixo tc:.
+    envio = etree.Element(
+        f"{{{ENVIO}}}{ISSNET_CONSULTA_URL_ELEMENTO_RAIZ}",
+        nsmap={None: ENVIO, "tc": TC},
+    )
+
+    # Prestador (NS de envio) com identificação no NS tipos_complexos (tc:).
+    prest = _el_envio(envio, "Prestador")
+    cpfcnpj = _el_tc(prest, "CpfCnpj")
+    _el_tc(cpfcnpj, "Cnpj", cnpj_prestador)
+    if im_prestador:
+        _el_tc(prest, "InscricaoMunicipal", im_prestador)
+
+    # Número da NFS-e e código de tributação municipal (ambos no NS de envio).
+    _el_envio(envio, "Numero", str(numero_nfse).strip())
+    _el_envio(envio, "CodigoTributacaoMunicipio", cod_trib_mun)
+
+    return etree.tostring(envio, encoding="unicode", xml_declaration=False)
+
+
+async def consultar_url_nfse(numero_nfse: str) -> dict[str, Any]:
+    """Consulta a URL oficial de uma NFS-e no ISSnet DF (operação ConsultarUrlNfse).
+
+    Fluxo (reaproveita toda a infra SOAP/mTLS do backend ABRASF):
+        1. Monta ConsultarUrlNfseEnvio (sem assinatura — ver _montar_xml_...)
+        2. Envelopa em SOAP (nfseCabecMsg + nfseDadosMsg), operação ConsultarUrlNfse
+        3. Envia via httpx com mTLS ao endpoint ABRASF do ambiente atual
+        4. Arquiva envio + retorno em nfse_emitidas/
+        5. Parseia a resposta procurando o elemento de URL (tolerante a namespace)
+
+    NÃO faz parte do fluxo de emissão (não é chamada por _emitir_abrasf204 ainda) —
+    é um utilitário para obter a URL/PDF de uma NFS-e já emitida.
+
+    Args:
+        numero_nfse: número da NFS-e (ex.: "408").
+
+    Returns:
+        dict: {"sucesso", "url", "mensagens", "raw_response" (truncado p/ log)}.
+    """
+    resultado: dict[str, Any] = {
+        "sucesso": False,
+        "url": None,
+        "mensagens": [],
+        "raw_response": "",
+    }
+
+    # 1. Montar o XML de consulta (sem assinatura — ABRASF dispensa em consultas).
+    try:
+        xml_consulta = _montar_xml_consultar_url_nfse(numero_nfse)
+    except Exception as exc:
+        logger.exception("Falha ao montar ConsultarUrlNfseEnvio")
+        resultado["mensagens"] = [f"Erro ao montar consulta: {exc}"]
+        return resultado
+
+    # 2. Envelopar em SOAP (mesmo padrão do GerarNfse), porém com a operação e a
+    #    SOAPAction de ConsultarUrlNfse.
+    envelope = _envelopar_soap_abrasf_operacao(
+        xml_consulta, ABRASF_OPERACAO_CONSULTA_URL
+    )
+
+    # Arquiva o envio (mesmo em caso de erro adiante — diagnóstico).
+    try:
+        _arquivar(envelope, prefix=f"nfse_{numero_nfse}", suffix="consulta_url_enviado")
+    except Exception as exc:
+        logger.warning(f"Não foi possível arquivar envio da consulta de URL: {exc}")
+
+    # 3. Enviar (mTLS) ao endpoint do ambiente atual.
+    endpoint = _abrasf_endpoint()
+    if not endpoint:
+        resultado["mensagens"] = [
+            "URL do webservice ABRASF 2.04 não configurada "
+            "(NFSE_WS_URL_ABRASF_PRODUCAO / _HOMOLOGACAO no .env)."
+        ]
+        return resultado
+
+    try:
+        resposta_xml, status_code = _enviar_soap_abrasf_operacao(
+            envelope, endpoint, ABRASF_SOAP_ACTION_CONSULTA_URL
+        )
+    except Exception as exc:
+        logger.exception("Falha ao enviar ConsultarUrlNfse ao webservice")
+        resultado["mensagens"] = [f"Erro ao enviar ao webservice: {exc}"]
+        return resultado
+
+    # 4. Arquivar o retorno.
+    try:
+        _arquivar(
+            resposta_xml, prefix=f"nfse_{numero_nfse}", suffix="consulta_url_retorno"
+        )
+    except Exception as exc:
+        logger.warning(f"Não foi possível arquivar retorno da consulta de URL: {exc}")
+
+    # raw_response truncado (8 KB) — o suficiente para inspecionar a estrutura sem
+    # poluir o log com um corpo enorme.
+    resultado["raw_response"] = resposta_xml[:8000]
+
+    if status_code >= 400:
+        resultado["mensagens"] = [
+            f"Webservice ABRASF retornou HTTP {status_code} na ConsultarUrlNfse."
+        ]
+        logger.error(
+            f"[ConsultarUrlNfse] HTTP {status_code} para {endpoint} "
+            f"(NFS-e {numero_nfse})"
+        )
+        return resultado
+
+    # 5. Parsear a resposta atrás da URL + eventuais mensagens de erro.
+    try:
+        info = _parsear_resposta_consultar_url(resposta_xml)
+        resultado["url"] = info.get("url")
+        resultado["mensagens"] = info.get("mensagens", [])
+        resultado["sucesso"] = bool(info.get("url"))
+    except Exception as exc:
+        logger.exception("Falha ao parsear retorno da ConsultarUrlNfse")
+        resultado["mensagens"] = [f"Erro ao parsear retorno: {exc}"]
+
+    return resultado
+
+
+def _parsear_resposta_consultar_url(xml_resposta: str) -> dict[str, Any]:
+    """Extrai a URL de ConsultarUrlNfseResposta (tolerante a namespace).
+
+    Procura, por localname, qualquer elemento cujo nome CONTENHA "Url" (ex.:
+    UrlNfse, Url, UrlVisualizacaoNfse) ou cujo TEXTO comece com "http". Também
+    coleta ListaMensagemRetorno (erros) se houver. Tudo por localname para ignorar
+    o envelope SOAP e variações de prefixo/namespace do ISSnet.
+
+    ⚠️ AJUSTÁVEL PÓS-TESTE: se o ISSnet aninhar a URL num elemento com nome
+    inesperado (sem "Url" e sem texto http), inspecionar o raw_response e ajustar
+    a heurística abaixo.
+    """
+    from lxml import etree
+
+    root = etree.fromstring(
+        xml_resposta.encode("utf-8"), parser=_get_safe_xml_parser()
+    )
+
+    url: Optional[str] = None
+    for el in root.iter():
+        if el.text is None:
+            continue
+        texto = el.text.strip()
+        if not texto:
+            continue
+        localname = etree.QName(el).localname
+        # 1ª heurística: nome do elemento contém "Url". 2ª: o texto é uma URL http.
+        if "url" in localname.lower() or texto.lower().startswith("http"):
+            url = texto
+            break
+
+    # Mensagens de rejeição (mesmo formato do GerarNfse).
+    mensagens: list[str] = []
+    for el in root.iter():
+        if etree.QName(el).localname == "MensagemRetorno":
+            codigo = _text_child(el, "Codigo")
+            texto = _text_child(el, "Mensagem")
+            correcao = _text_child(el, "Correcao")
+            if texto:
+                full = f"[{codigo or '?'}] {texto}"
+                if correcao:
+                    full += f" — Correção: {correcao}"
+                mensagens.append(full)
+
+    # Se não achou URL nem mensagem, tenta um SOAP Fault para não mascarar erro.
+    if not url and not mensagens:
+        for tag in ("faultstring", "Reason", "Text"):
+            fault = next(
+                (e.text.strip() for e in root.iter()
+                 if etree.QName(e).localname == tag and e.text and e.text.strip()),
+                None,
+            )
+            if fault:
+                mensagens.append(fault)
+                break
+
+    return {"url": url, "mensagens": mensagens}
+
+
+def baixar_pdf_nfse(url: str) -> Optional[bytes]:
+    """Baixa o PDF/DANFSE oficial a partir da URL retornada por ConsultarUrlNfse.
+
+    Faz um GET (httpx, follow_redirects, timeout 30s) SEM certificado — a página de
+    visualização do ISSnet costuma ser pública. Se o servidor exigir mTLS (raro),
+    ajustar para reutilizar `_pkcs12_to_pem_tempfiles` (ver comentário abaixo).
+
+    Considera PDF quando o Content-Type indica PDF OU o conteúdo começa com o magic
+    number "%PDF". Caso contrário (HTML de visualização) retorna None — cabe ao
+    chamador decidir o que fazer com a página.
+
+    Args:
+        url: URL retornada por consultar_url_nfse().
+
+    Returns:
+        bytes do PDF se for um PDF direto; None se for HTML/outro conteúdo.
+    """
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True, verify=True) as client:
+            resp = client.get(url)
+    except Exception as exc:
+        logger.warning(f"[baixar_pdf_nfse] Falha no GET de {url}: {exc}")
+        return None
+
+    content_type = resp.headers.get("content-type", "")
+    conteudo = resp.content
+    logger.info(
+        f"[baixar_pdf_nfse] GET {url} → HTTP {resp.status_code}, "
+        f"content-type='{content_type}', {len(conteudo)} bytes"
+    )
+
+    if resp.status_code >= 400:
+        return None
+
+    eh_pdf = "pdf" in content_type.lower() or conteudo[:5] == b"%PDF-"
+    if eh_pdf:
+        return conteudo
+
+    # Não é PDF direto (provavelmente uma página HTML de visualização).
+    return None
 
 
 # =============================================================================

@@ -198,10 +198,11 @@ class Settings(BaseSettings):
     smtp_senha: str = Field("", description="Senha ou app password do SMTP")
     smtp_usar_tls: bool = Field(True, description="Usar STARTTLS (True) ou SSL direto (False)")
     smtp_remetente_nome: str = Field(
-        "MEGASUPORTE TI", description="Nome exibido como remetente"
+        "MEGASUPORTE - Financeiro", description="Nome exibido como remetente"
     )
     smtp_remetente_email: str = Field(
-        "", description="E-mail do remetente (se vazio, usa smtp_usuario)"
+        "financeiro@megasuporte.com",
+        description="E-mail do remetente (se vazio, usa smtp_usuario)",
     )
 
     # --- IBSCBS (Reforma Tributária EC 132/2023 — obrigatório no schema v1.01) ---

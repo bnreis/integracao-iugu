@@ -452,8 +452,24 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
 
         # Sucesso: envia o e-mail e retorna como emitida.
         try:
+            from datetime import date
+
             from .email_nfse import enviar_nfse_email
-            enviar_nfse_email(empresa, resultado_nfse)
+
+            # ResultadoEmissao.to_dict() não traz valor/data_emissao — o template
+            # precisa deles. Enriquece o dict (sem mutar a chave 'nfse' do retorno)
+            # com os mesmos campos que o log .json e o reenvio manual usam, para
+            # que auto-envio e reenviar gerem e-mail IDÊNTICO.
+            total_cents = int(
+                invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
+            )
+            dados_email = {
+                **resultado_nfse,
+                "valor": round(total_cents / 100.0, 2),
+                "data_emissao": date.today().isoformat(),
+                "razao_social": empresa.razao_social,
+            }
+            enviar_nfse_email(empresa, dados_email)
         except ImportError:
             logger.warning("Módulo email_nfse não disponível — NFS-e não enviada por e-mail")
         except Exception as email_exc:

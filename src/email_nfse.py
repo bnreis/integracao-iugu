@@ -1,14 +1,22 @@
 """
 Módulo de envio de NFS-e por e-mail.
 
-Envia o XML da NFS-e emitida como anexo para o e-mail do cliente (tomador).
-Usado em dois fluxos:
-  1. NFS-e emitida na CRIAÇÃO da fatura (scheduled_invoices.py → nf_na_criacao=True)
-  2. NFS-e emitida no PAGAMENTO da fatura (webhook_server.py → fluxo padrão)
+Envia o XML da NFS-e emitida como anexo para o e-mail do cliente (tomador),
+acompanhado de um template HTML responsivo (CSS inline) com os dados da nota.
+
+Usado em dois fluxos — AMBOS passam pela mesma função `enviar_nfse_email`,
+garantindo template idêntico:
+  1. PAGAMENTO da fatura (webhook_server.py → processar_pagamento, auto-envio)
+  2. Reenvio manual pelo painel/app (api_routes.py → reenviar_nfse_email)
+  (e também a emissão na CRIAÇÃO da fatura, scheduled_invoices.py)
 
 Requisitos:
   - Configurar SMTP_HOST, SMTP_USUARIO e SMTP_SENHA no .env
-  - O e-mail do destinatário vem do campo `email` do objeto Empresa (planilha)
+  - O remetente é financeiro@megasuporte.com (settings.smtp_remetente_email);
+    o SMTP precisa autenticar como esse endereço (ou um relay que o autorize).
+  - O e-mail do destinatário vem do campo `email` do objeto Empresa (tomador).
+  - A logo da assinatura (assets/logo_megasuporte.png) é embutida via CID se
+    existir; se não existir, a assinatura usa só texto (sem quebrar o envio).
 
 Se as configurações SMTP não estiverem preenchidas, loga um aviso e retorna
 sem erro (o fluxo principal não é interrompido por falha de e-mail).
@@ -17,6 +25,7 @@ from __future__ import annotations
 
 import smtplib
 from email.mime.application import MIMEApplication
+from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -24,8 +33,23 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from .config import settings
+from .config import PROJECT_ROOT, settings
 from .iugu_empresas import Empresa
+
+# Caminho da logo da assinatura. Embutida como imagem inline (CID) SE existir.
+LOGO_PATH = PROJECT_ROOT / "assets" / "logo_megasuporte.png"
+# Content-ID usado para referenciar a logo inline no HTML (<img src="cid:...">).
+_LOGO_CID = "logo_megasuporte"
+
+# Dados fixos da assinatura (rodapé) — aprovados pelo Bruno.
+_PRESTADOR_NOME = "MEGASUPORTE SERVIÇOS DE TI"
+_FINANCEIRO_EMAIL = "financeiro@megasuporte.com"
+_ENDERECO_LINHA_1 = "SHN Quadra 01 Conjunto A Bloco A Ed. Le Quartier"
+_ENDERECO_LINHA_2 = "5º andar, sala 523, Brasília-DF, Cep 70.701-000"
+# Página oficial de verificação de autenticidade da NFS-e do DF.
+_PORTAL_DANFSE = "https://iss.fazenda.df.gov.br/online/NotaDigital/VerificaAutenticidade.aspx"
+# Inscrição Municipal (CF/DF) da MEGASUPORTE — pedida na página de verificação.
+_INSCRICAO_MUNICIPAL = "0796481500161"
 
 
 def _smtp_configurado() -> bool:
@@ -38,21 +62,259 @@ def _remetente() -> str:
     return settings.smtp_remetente_email or settings.smtp_usuario
 
 
-def _anexar_arquivo(msg: MIMEMultipart, caminho: Path, nome_arquivo: Optional[str] = None) -> bool:
-    """Anexa um arquivo ao e-mail. Retorna True se conseguiu."""
-    if not caminho or not caminho.exists():
-        logger.debug(f"Arquivo não encontrado para anexar: {caminho}")
-        return False
-    nome = nome_arquivo or caminho.name
+def _formatar_valor_brl(valor: Any) -> Optional[str]:
+    """Formata um valor numérico (reais) como 'R$ 1.234,56'. Retorna None se inválido."""
+    if valor is None or valor == "":
+        return None
     try:
-        with open(caminho, "rb") as f:
-            parte = MIMEApplication(f.read(), Name=nome)
-        parte["Content-Disposition"] = f'attachment; filename="{nome}"'
-        msg.attach(parte)
-        return True
+        numero = float(valor)
+    except (TypeError, ValueError):
+        # Já veio formatado como string (ex.: "3.150,00") — devolve como está.
+        return str(valor)
+    # Formato BR: milhar com ponto, decimal com vírgula.
+    inteiro = f"{numero:,.2f}"  # ex.: "3,150.00"
+    inteiro = inteiro.replace(",", "_").replace(".", ",").replace("_", ".")
+    return f"R$ {inteiro}"
+
+
+def _extrair_nfse_do_retorno(caminho_xml: Path) -> Optional[bytes]:
+    """
+    Lê o XML de retorno do webservice e tenta extrair só o elemento da NFS-e
+    (CompNfse/Nfse), descartando o envelope SOAP/resposta. Se não conseguir
+    isolar o nó, devolve o conteúdo inteiro do arquivo (fallback seguro).
+
+    Retorna os bytes do XML a anexar, ou None se o arquivo não puder ser lido.
+    """
+    try:
+        conteudo = caminho_xml.read_bytes()
     except Exception as exc:
-        logger.warning(f"Falha ao anexar {caminho}: {exc}")
-        return False
+        logger.warning(f"Não foi possível ler o XML de retorno {caminho_xml}: {exc}")
+        return None
+
+    # Tenta isolar <CompNfse> (ABRASF) ou <Nfse> (padrão nacional) via lxml.
+    # Qualquer falha de parse cai no fallback: anexa o retorno inteiro.
+    try:
+        from lxml import etree
+
+        raiz = etree.fromstring(conteudo)
+        for tag in ("CompNfse", "Nfse"):
+            # Busca ignorando namespace (local-name) — robusto a prefixos variados.
+            encontrados = raiz.xpath(f"//*[local-name()='{tag}']")
+            if encontrados:
+                no = encontrados[0]
+                return etree.tostring(no, encoding="utf-8", xml_declaration=True)
+    except Exception as exc:
+        logger.debug(f"Não foi possível isolar CompNfse/Nfse ({exc}); anexando retorno inteiro")
+
+    return conteudo
+
+
+def _anexar_xml_nfse(msg: MIMEMultipart, dados: dict[str, Any], numero_nfse: str) -> bool:
+    """
+    Anexa o XML da NFS-e oficial (vindo do xml_retorno_path). Cai para o
+    xml_enviado_path apenas se o retorno não existir. Retorna True se anexou.
+    """
+    # Preferência: o XML de RETORNO contém a NFS-e oficial (número + código).
+    xml_retorno = dados.get("xml_retorno_path")
+    if xml_retorno:
+        caminho = Path(xml_retorno)
+        if caminho.exists():
+            payload = _extrair_nfse_do_retorno(caminho)
+            if payload:
+                parte = MIMEApplication(payload, _subtype="xml")
+                nome = f"NFS-e_{numero_nfse}.xml"
+                parte["Content-Disposition"] = f'attachment; filename="{nome}"'
+                parte.set_type("application/xml")
+                msg.attach(parte)
+                return True
+        else:
+            logger.warning(f"xml_retorno_path não encontrado no disco: {caminho}")
+
+    # Fallback: o DPS/RPS enviado (não é a nota oficial, mas é melhor que nada).
+    xml_enviado = dados.get("xml_enviado_path")
+    if xml_enviado:
+        caminho = Path(xml_enviado)
+        if caminho.exists():
+            try:
+                parte = MIMEApplication(caminho.read_bytes(), _subtype="xml")
+                nome = f"NFS-e_{numero_nfse}_DPS.xml"
+                parte["Content-Disposition"] = f'attachment; filename="{nome}"'
+                parte.set_type("application/xml")
+                msg.attach(parte)
+                return True
+            except Exception as exc:
+                logger.warning(f"Falha ao anexar XML enviado {caminho}: {exc}")
+
+    return False
+
+
+def _bloco_logo_html() -> str:
+    """Retorna a tag <img> da logo (CID) se o arquivo existir, senão string vazia."""
+    if LOGO_PATH.exists():
+        return (
+            f'<img src="cid:{_LOGO_CID}" alt="{_PRESTADOR_NOME}" '
+            f'style="max-height: 56px; margin-bottom: 8px;" />'
+        )
+    return ""
+
+
+def _montar_html(
+    *,
+    numero_nfse: str,
+    codigo_verif: str,
+    data_emissao: Optional[str],
+    valor_fmt: Optional[str],
+) -> str:
+    """Monta o corpo HTML do e-mail (responsivo simples, CSS inline)."""
+    # Linhas opcionais da tabela: só renderiza se houver o dado.
+    linha_codigo = (
+        f"""
+      <tr>
+        <td style="padding: 8px 14px; font-weight: bold; border: 1px solid #e0e0e0; background: #f7f7f7;">Código de verificação</td>
+        <td style="padding: 8px 14px; border: 1px solid #e0e0e0;">{codigo_verif}</td>
+      </tr>"""
+        if codigo_verif
+        else ""
+    )
+    linha_data = (
+        f"""
+      <tr>
+        <td style="padding: 8px 14px; font-weight: bold; border: 1px solid #e0e0e0; background: #f7f7f7;">Data de emissão</td>
+        <td style="padding: 8px 14px; border: 1px solid #e0e0e0;">{data_emissao}</td>
+      </tr>"""
+        if data_emissao
+        else ""
+    )
+    linha_valor = (
+        f"""
+      <tr>
+        <td style="padding: 8px 14px; font-weight: bold; border: 1px solid #e0e0e0; background: #f7f7f7;">Valor dos serviços</td>
+        <td style="padding: 8px 14px; border: 1px solid #e0e0e0;">{valor_fmt}</td>
+      </tr>"""
+        if valor_fmt
+        else ""
+    )
+
+    return f"""\
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+<body style="margin: 0; padding: 0; background: #f4f4f4;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 24px; font-family: Arial, Helvetica, sans-serif; color: #333; font-size: 15px; line-height: 1.5;">
+
+    <p style="margin: 0 0 12px;">Prezados,</p>
+
+    <p style="margin: 0 0 16px;">
+      A <strong>{_PRESTADOR_NOME}</strong> emitiu a Nota Fiscal de Serviço Eletrônica (NFS-e)
+      referente aos serviços prestados.
+    </p>
+
+    <table role="presentation" style="border-collapse: collapse; width: 100%; max-width: 480px; margin: 0 0 18px;">
+      <tr>
+        <td style="padding: 8px 14px; font-weight: bold; border: 1px solid #e0e0e0; background: #f7f7f7;">Inscrição Municipal (prestador)</td>
+        <td style="padding: 8px 14px; border: 1px solid #e0e0e0;">{_INSCRICAO_MUNICIPAL}</td>
+      </tr>
+      <tr>
+        <td style="padding: 8px 14px; font-weight: bold; border: 1px solid #e0e0e0; background: #f7f7f7;">Número da NFS-e</td>
+        <td style="padding: 8px 14px; border: 1px solid #e0e0e0;">{numero_nfse}</td>
+      </tr>{linha_codigo}{linha_data}{linha_valor}
+    </table>
+
+    <p style="margin: 0 0 12px;">
+      &#128206; <strong>Anexo:</strong> XML da NFS-e.
+    </p>
+
+    <p style="margin: 0 0 16px;">
+      &#128279; <strong>PDF oficial / verificar autenticidade:</strong> acesse
+      <a href="{_PORTAL_DANFSE}" style="color: #1a5fb4;">{_PORTAL_DANFSE}</a>
+      e informe os dados acima (Inscrição Municipal, Número da NFS-e e Código de
+      verificação) para visualizar/imprimir a nota.
+    </p>
+
+    <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
+
+    <!-- Assinatura / rodapé -->
+    <div style="font-size: 13px; color: #555;">
+      {_bloco_logo_html()}
+      <p style="margin: 0 0 2px; font-weight: bold; color: #333;">Financeiro</p>
+      <p style="margin: 0 0 2px;">
+        <a href="mailto:{_FINANCEIRO_EMAIL}" style="color: #1a5fb4;">{_FINANCEIRO_EMAIL}</a>
+      </p>
+      <p style="margin: 0 0 2px;">{_ENDERECO_LINHA_1}</p>
+      <p style="margin: 0;">{_ENDERECO_LINHA_2}</p>
+    </div>
+
+  </div>
+</body>
+</html>
+"""
+
+
+def montar_email_nfse(
+    empresa: Empresa,
+    dados: dict[str, Any],
+    *,
+    destinatario_extra: Optional[str] = None,
+) -> tuple[MIMEMultipart, str, list[str]]:
+    """
+    Monta a mensagem MIME completa (template HTML + logo inline + anexo XML).
+
+    Separada do envio para permitir PREVIEW sem SMTP (scripts/preview_email_nfse.py).
+
+    Args:
+        empresa: dados do tomador — usa empresa.razao_social e empresa.email.
+        dados: dict com numero_nfse, codigo_verificacao, valor, data_emissao,
+            xml_retorno_path / xml_enviado_path.
+        destinatario_extra: e-mail adicional em cópia (CC).
+
+    Returns:
+        (mensagem MIME, html do corpo, lista de destinatários).
+    """
+    numero_nfse = str(dados.get("numero_nfse") or "?")
+    codigo_verif = str(dados.get("codigo_verificacao") or "")
+    data_emissao = dados.get("data_emissao")
+    valor_fmt = _formatar_valor_brl(dados.get("valor"))
+    razao_tomador = empresa.razao_social or "Cliente"
+
+    msg = MIMEMultipart("related")
+    msg["From"] = f"{settings.smtp_remetente_nome} <{_remetente()}>"
+    msg["To"] = empresa.email or ""
+    msg["Subject"] = f"NFS-e nº {numero_nfse} — {_PRESTADOR_NOME}"
+    destinatarios: list[str] = [empresa.email] if empresa.email else []
+    if destinatario_extra:
+        msg["Cc"] = destinatario_extra
+        destinatarios.append(destinatario_extra)
+
+    html = _montar_html(
+        numero_nfse=numero_nfse,
+        codigo_verif=codigo_verif,
+        data_emissao=str(data_emissao) if data_emissao else None,
+        valor_fmt=valor_fmt,
+    )
+    msg.attach(MIMEText(html, "html", "utf-8"))
+
+    # Logo inline (CID) — só se o arquivo existir.
+    if LOGO_PATH.exists():
+        try:
+            with open(LOGO_PATH, "rb") as f:
+                img = MIMEImage(f.read())
+            img.add_header("Content-ID", f"<{_LOGO_CID}>")
+            img.add_header("Content-Disposition", "inline", filename=LOGO_PATH.name)
+            msg.attach(img)
+        except Exception as exc:
+            logger.warning(f"Falha ao embutir logo {LOGO_PATH}: {exc}")
+
+    # Anexo: XML da NFS-e oficial. Se não houver, envia mesmo assim (warning).
+    if not _anexar_xml_nfse(msg, dados, numero_nfse):
+        logger.warning(
+            f"XML da NFS-e Nº {numero_nfse} não encontrado — e-mail enviado SEM anexo "
+            f"(empresa {razao_tomador})"
+        )
+
+    return msg, html, destinatarios
 
 
 def enviar_nfse_email(
@@ -62,24 +324,24 @@ def enviar_nfse_email(
     destinatario_extra: Optional[str] = None,
 ) -> bool:
     """
-    Envia a NFS-e emitida por e-mail para o cliente.
+    Envia a NFS-e emitida por e-mail para o tomador (mesmo template no auto-envio
+    do webhook e no reenvio manual do painel/app).
 
     Args:
-        empresa: dados da empresa tomadora (planilha) — usa empresa.email
-        nfse_result: dict retornado por ResultadoEmissao.to_dict() com:
+        empresa: dados da empresa tomadora — usa empresa.razao_social e empresa.email.
+        nfse_result: dict com os dados da nota. Chaves consumidas:
             - numero_nfse: número da NFS-e
-            - xml_enviado_path: caminho do XML da DPS enviada
-            - xml_retorno_path: caminho do XML de retorno do webservice
-            - pdf_path: caminho do PDF (hoje sempre None — não geramos mais PDF
-              próprio; o DANFSE oficial virá do ISSnet via ConsultarUrlNfse)
-            - codigo_verificacao: código de verificação da NFS-e
-        destinatario_extra: e-mail adicional para enviar cópia (CC)
+            - codigo_verificacao: código de verificação
+            - valor: valor dos serviços em reais (float) — opcional
+            - data_emissao: data ISO YYYY-MM-DD — opcional
+            - xml_retorno_path: XML de retorno (NFS-e oficial) — anexado de preferência
+            - xml_enviado_path: XML do DPS/RPS enviado — fallback de anexo
+        destinatario_extra: e-mail adicional para cópia (CC).
 
     Returns:
         True se o e-mail foi enviado com sucesso, False caso contrário.
         Falhas de e-mail NÃO levantam exceção — apenas logam o erro.
     """
-    # Verifica configuração SMTP
     if not _smtp_configurado():
         logger.warning(
             f"SMTP não configurado — NFS-e de {empresa.razao_social} "
@@ -88,9 +350,7 @@ def enviar_nfse_email(
         )
         return False
 
-    # Verifica e-mail do destinatário
-    email_destino = empresa.email
-    if not email_destino:
+    if not empresa.email:
         logger.warning(
             f"Empresa {empresa.razao_social} ({empresa.cnpj}) sem e-mail cadastrado — "
             f"NFS-e Nº {nfse_result.get('numero_nfse', '?')} não enviada"
@@ -98,93 +358,9 @@ def enviar_nfse_email(
         return False
 
     numero_nfse = nfse_result.get("numero_nfse", "?")
-    codigo_verif = nfse_result.get("codigo_verificacao", "")
-
-    # Monta o e-mail
-    msg = MIMEMultipart()
-    msg["From"] = f"{settings.smtp_remetente_nome} <{_remetente()}>"
-    msg["To"] = email_destino
-    msg["Subject"] = (
-        f"NFS-e Nº {numero_nfse} — {settings.nfse_razao_social_prestador}"
+    msg, _html, destinatarios = montar_email_nfse(
+        empresa, nfse_result, destinatario_extra=destinatario_extra
     )
-
-    if destinatario_extra:
-        msg["Cc"] = destinatario_extra
-
-    # Corpo do e-mail (HTML)
-    corpo_html = f"""\
-<html>
-<body style="font-family: Arial, sans-serif; color: #333;">
-<p>Prezado(a),</p>
-
-<p>Segue em anexo a <strong>Nota Fiscal de Serviço Eletrônica (NFS-e)</strong>
-referente aos serviços prestados por <strong>{settings.nfse_razao_social_prestador}</strong>.</p>
-
-<table style="border-collapse: collapse; margin: 16px 0;">
-  <tr>
-    <td style="padding: 4px 12px; font-weight: bold;">Número da NFS-e:</td>
-    <td style="padding: 4px 12px;">{numero_nfse}</td>
-  </tr>
-  <tr>
-    <td style="padding: 4px 12px; font-weight: bold;">Tomador:</td>
-    <td style="padding: 4px 12px;">{empresa.razao_social}</td>
-  </tr>
-  <tr>
-    <td style="padding: 4px 12px; font-weight: bold;">CNPJ Tomador:</td>
-    <td style="padding: 4px 12px;">{empresa.cnpj}</td>
-  </tr>
-  {"<tr><td style='padding: 4px 12px; font-weight: bold;'>Código de Verificação:</td>"
-   f"<td style='padding: 4px 12px;'>{codigo_verif}</td></tr>" if codigo_verif else ""}
-</table>
-
-<p>O(s) arquivo(s) XML da NFS-e segue(m) em anexo.</p>
-
-<p style="font-size: 0.9em; color: #666;">
-Este e-mail foi gerado automaticamente pelo sistema de faturamento da
-{settings.nfse_razao_social_prestador}. Em caso de dúvidas, entre em contato
-respondendo a este e-mail.
-</p>
-</body>
-</html>
-"""
-    msg.attach(MIMEText(corpo_html, "html", "utf-8"))
-
-    # Anexa os XMLs disponíveis. O XML é o entregável principal: não geramos mais
-    # PDF próprio, então o envio NÃO depende de PDF — o corpo do e-mail já traz
-    # número + código de verificação. Se houver pdf_path (futuro), também anexa.
-    anexos_ok = 0
-    xml_enviado = nfse_result.get("xml_enviado_path")
-    if xml_enviado:
-        nome_xml = f"NFS-e_{numero_nfse}_DPS.xml"
-        if _anexar_arquivo(msg, Path(xml_enviado), nome_xml):
-            anexos_ok += 1
-
-    xml_retorno = nfse_result.get("xml_retorno_path")
-    if xml_retorno:
-        nome_ret = f"NFS-e_{numero_nfse}_retorno.xml"
-        if _anexar_arquivo(msg, Path(xml_retorno), nome_ret):
-            anexos_ok += 1
-
-    # TODO ConsultarUrlNfse: hoje pdf_path é sempre None (PDF próprio removido).
-    # Quando a consulta da nota no ISSnet (ConsultarUrlNfse) for implementada, ela
-    # deverá preencher pdf_path (ou uma URL no corpo) e este bloco anexa o PDF oficial.
-    pdf_path = nfse_result.get("pdf_path")
-    if pdf_path:
-        nome_pdf = f"NFS-e_{numero_nfse}.pdf"
-        if _anexar_arquivo(msg, Path(pdf_path), nome_pdf):
-            anexos_ok += 1
-
-    if anexos_ok == 0:
-        logger.warning(
-            f"Nenhum arquivo de NFS-e encontrado para anexar ao e-mail "
-            f"(NFS-e Nº {numero_nfse}, empresa {empresa.razao_social})"
-        )
-        # Envia mesmo assim — o corpo do e-mail já tem número + código de verificação
-
-    # Envia
-    destinatarios = [email_destino]
-    if destinatario_extra:
-        destinatarios.append(destinatario_extra)
 
     try:
         if settings.smtp_usar_tls:
@@ -202,8 +378,8 @@ respondendo a este e-mail.
                 servidor.sendmail(_remetente(), destinatarios, msg.as_string())
 
         logger.info(
-            f"📧 NFS-e Nº {numero_nfse} enviada por e-mail para {email_destino} "
-            f"({empresa.razao_social}) — {anexos_ok} anexo(s)"
+            f"📧 NFS-e Nº {numero_nfse} enviada por e-mail para {empresa.email} "
+            f"({empresa.razao_social})"
         )
         return True
 
@@ -214,7 +390,7 @@ respondendo a este e-mail.
         )
     except smtplib.SMTPException as exc:
         logger.error(
-            f"Erro SMTP ao enviar NFS-e Nº {numero_nfse} para {email_destino}: {exc}"
+            f"Erro SMTP ao enviar NFS-e Nº {numero_nfse} para {empresa.email}: {exc}"
         )
     except Exception as exc:
         logger.error(
