@@ -3,28 +3,41 @@
 Este documento explica o que foi implementado na Fase 2 e o que falta fazer para
 colocar em produção.
 
-> **Atualizado em 19/04/2026** com base no **Manual de Integração Webservice — NFS-e Padrão Nacional v1.01** (Nota Control, revisado em 17/03/2026). Autoria: Elizângela Ferreira.
+> **Histórico:** documento original escrito em 19/04/2026 para o Padrão Nacional (DPS v1.01). O cabeçalho abaixo reflete o estado real em **05/06/2026**. As seções seguintes ainda descrevem o backend nacional (DPS) e seguem válidas como referência técnica desse caminho.
 
-## 🟡 Status atual — BLOQUEADO POR SCHEMA v1.01
+## ✅ Status atual (05/06/2026) — emissor dual pronto; aguardando validação do XML pelo Nota Control
 
-**Onde paramos em 19/04/2026 18:57:**
+A Fase 2 saiu do bloqueio cadastral e migrou para uma **arquitetura dual** que cobre o presente e o futuro:
 
-- ✅ Webservice responde e aceita nossa autenticação mTLS
-- ✅ Envelope SOAP com `nfseCabecMsg` + `nfseDadosMsg` aceito
-- ✅ Assinatura digital XMLDSig com certificado A1 validada
-- ✅ Campos obrigatórios `regTrib` (preenchido) e `totTrib` adicionados
-- ❌ **Schema da DPS: servidor espera v1.01, estamos enviando v1.00** → erro `E160`
+- A MEGASUPORTE foi **habilitada em produção** pelo Nota Control (chamado de 05/06/2026). O webservice **oficial em produção é o ABRASF 2.04**, série RPS 3 — não o Padrão Nacional (DPS), que ainda dá 404. O Padrão Nacional só vira obrigatório em **30/06/2026** (prazo prorrogado).
+- **Decisão arquitetural ADR-0005:** abstração por protocolo — dispatcher por `NFSE_PADRAO` no `.env` (`abrasf204` agora, `nacional` depois de 30/06). A virada vira **troca de uma variável**, não reescrita. Ver `docs/adr/ADR-0005-abrasf-2.04-rps.md` + `docs/adr/README.md`.
+- **Backend nacional (DPS v1.01):** ✅ pronto, XML válido contra XSD v1.01, E160 resolvido (5 patches lxml + IBSCBS) — fica como `_emitir_nacional` em `src/nfse_df.py`.
+- **Backend ABRASF 2.04 (RPS):** ✅ pronto estruturalmente em `src/nfse_df.py` (`_emitir_abrasf204`), XML válido contra o XSD oficial **com e sem Signature** (`scripts/validar_rps_xsd.py` e `--com-assinatura`). Dois fixes do code-reviewer + appsec aplicados (05/06/2026):
+  - Reposicionamento da `Signature` para dentro de `<Rps>` (irmã de `InfDeclaracaoPrestacaoServico`) — antes ela caía como filha de `GerarNfseEnvio`, o que daria E160 no primeiro envio real.
+  - Endurecimento do helper de PEMs do certificado A1 (`tempfile.mkstemp` + `chmod 0600` + warning no `finally`) e parser XML seguro anti-XXE em todo o parsing.
+- **Fiscal:** código de tributação `1071` + alíquota `2%` **confirmados pela contabilidade em 05/06/2026** (a ficha cadastral lista 1071=5% genérico, mas o contador autorizou 1071+2% para este prestador). `cTribMun=1071`, `cNBS=115013000`, IBSCBS CST `900`/cClassTrib `900001` — sem mudança no `.env`.
+- **CF/DF / IM:** `0796481500161` confirmado correto pela ficha cadastral oficial — o problema antigo era habilitação, não valor.
 
-### Causa raiz identificada
-A biblioteca `nfelib 2.5.2` (versão mais nova em 19/04/2026) só suporta schema **v1.00**.
-O servidor do Nota Control exige **v1.01**, que tem um grupo novo obrigatório chamado
-`IBSCBS` (Imposto sobre Bens e Serviços / Contribuição sobre Bens e Serviços — Reforma
-Tributária EC 132/2023).
+### Pendências para o primeiro envio real (não-bloqueios estruturais)
 
-### Caminho para destravar
-Ver documento **`docs/HANDOFF_OPUS46.md`** — instruções completas para o próximo
-assistente implementar o IBSCBS via patch lxml sobre o XML gerado pela nfelib.
-Os arquivos de referência oficial já foram baixados em `docs/exemplos_oficiais/`.
+O backend está pronto, mas alguns detalhes do ISSnet DF só se confirmam batendo o servidor real. Estão centralizados como constantes no topo da seção ABRASF em `src/nfse_df.py` (qualquer ajuste é "1 linha"):
+
+1. **Namespace de serviço exato** (`ABRASF_SERVICE_NS`, hoje `http://nfse.abrasf.org.br`)
+2. **SOAPAction exato** (com/sem aspas)
+3. **`nfseCabecMsg`/`nfseDadosMsg`** como XML aninhado vs CDATA (ramo CDATA pronto, comentado)
+4. **`versaoDados`** aceito (`2.04`)
+5. **Faixa inicial do RPS série 3** — precisa ser **solicitada no portal ISSnet** (menu "Solicitação de Documentos Fiscais"); o contador `.contador_rps.json` começa em 1 e deve ser alinhado antes do primeiro envio
+6. Consistência `01.07` ↔ `1071` no envio real
+
+### Próximo passo concreto
+
+1. Gerar RPS de exemplo (`scripts/validar_rps_xsd.py --com-assinatura` em modo dry-run) e enviar para **`integracao.df@notacontrol.com.br`** pedindo validação do XML.
+2. Solicitar a faixa de RPS série 3 no portal ISSnet.
+3. Após retorno deles: ajustar constantes (se houver) → homologação ISSnet (`NFSE_PADRAO=abrasf204` + `NFSE_AMBIENTE=homologacao`) → 1 RPS produção R$1,00 com `--dry-run` antes do envio real.
+
+---
+
+> Histórico abaixo (escrito em abril/2026 sobre o caminho DPS) — preservado como referência técnica do backend nacional.
 
 ---
 

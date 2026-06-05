@@ -55,6 +55,28 @@ class Settings(BaseSettings):
     )
 
     # --- NFS-e DF ---
+    # ADR-0005: seletor de backend de emissão (abstração por protocolo).
+    # "nacional"  = Padrão Nacional CGNFS-e (DPS v1.01) — comportamento atual, default.
+    # "abrasf204" = ABRASF 2.04 (RPS série 3, ISSnet DF) — produção de transição (Parte B).
+    # A virada de produção é trocar NFSE_PADRAO no .env, não reescrever código.
+    # Default "nacional" para PRESERVAR o comportamento atual; produção setará
+    # "abrasf204" quando a Parte B estiver pronta e validada.
+    nfse_padrao: Literal["nacional", "abrasf204"] = Field(
+        "nacional",
+        description="Protocolo de emissão NFS-e: 'nacional' (DPS, atual) ou 'abrasf204' (RPS, transição)",
+    )
+    # URLs do webservice ABRASF 2.04 (ISSnet DF) — usadas pelo backend abrasf204 (Parte B).
+    nfse_ws_url_abrasf_homologacao: str = Field(
+        "https://www.issnetonline.com.br/homologaabrasf/webservicenfse204/nfse.asmx",
+        description="URL do webservice ABRASF 2.04 (ISSnet) em homologação",
+    )
+    nfse_ws_url_abrasf_producao: str = Field(
+        "https://df.issnetonline.com.br/webservicenfse204/nfse.asmx",
+        description="URL do webservice ABRASF 2.04 (ISSnet) em produção",
+    )
+    # Série do RPS no DF (ABRASF 2.04) — fixa em "3" conforme habilitação do Nota Control.
+    nfse_serie_rps: str = Field("3", description="Série do RPS no DF (ABRASF 2.04)")
+
     nfse_inscricao_municipal: str = Field("", description="Inscrição municipal DF")
     nfse_cnpj_prestador: str = Field("", description="CNPJ do prestador (só números)")
     nfse_razao_social_prestador: str = Field("", description="Razão social do prestador")

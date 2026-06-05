@@ -13,6 +13,15 @@ do dono do projeto (Bruno) antes de qualquer implementação.
 | [ADR-0002](ADR-0002-idempotencia-unique-invoice.md) | Idempotência da emissão por `UNIQUE(invoice_id)` | Proposto | Heurística frágil + TOCTOU → risco de NFS-e duplicada e falso bloqueio |
 | [ADR-0003](ADR-0003-customer-id-canonico.md) | `customer_id` como identificador canônico (multi-cliente) | Proposto | **Bug fiscal ativo**: roteamento por CNPJ → NFS-e com config do departamento errado |
 | [ADR-0004](ADR-0004-config-negocio-desacoplada-do-notes.md) | Desacoplar a config de negócio do campo `notes` da Iugu | Proposto | N+1 GETs à Iugu + config fiscal acoplada a campo de texto de terceiro |
+| [ADR-0005](ADR-0005-abrasf-2.04-rps.md) | Emissão de NFS-e DF via ABRASF 2.04 (RPS) como caminho de produção de transição | Proposto (condicionado) | Padrão Nacional (DPS) dá HTTP 404 em produção; DF confirmou ABRASF 2.04 (RPS série 3) até 30/06/2026 |
+
+> ⚠️ **ADR-0005 está condicionado à resposta do Nota Control** ao esclarecimento
+> `docs/email_notacontrol_padrao_nacional.md` (canal `integracao.df@notacontrol.com.br`).
+> É o **plano B**: só será executado se a resposta for *"use ABRASF 2.04 até 30/06/2026"*. Se o
+> Nota Control liberar a emissão direta pelo Padrão Nacional (DPS, já implementado), o ADR-0005
+> é descartado (vira `Depreciado`). Diferente dos ADR-0001..0004 (dívida estrutural interna), o
+> ADR-0005 é disparado por um **fato regulatório externo** (habilitação em produção + webservice
+> oficial do DF ser ABRASF 2.04, não o Padrão Nacional).
 
 ## Ordem de implementação sugerida (com dependências)
 

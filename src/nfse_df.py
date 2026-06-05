@@ -65,6 +65,41 @@ except ImportError:  # pragma: no cover
     ERPBRASIL_DISPONIVEL = False
 
 
+# -----------------------------------------------------------------------------
+# Parser XML seguro (defesa em profundidade contra XXE / billion laughs)
+# -----------------------------------------------------------------------------
+# Reutilizado em qualquer parsing de XML de origem externa (resposta SOAP do
+# webservice ABRASF/ISSnet) e também no pós-processamento do XML assinado antes
+# do envio. lxml por padrão JÁ é mais restritivo que xml.etree em relação a
+# entidades externas, mas mantemos os flags explícitos para que a intenção seja
+# obvia em revisões futuras e para garantir o comportamento desejado em qualquer
+# build do libxml2:
+#   - resolve_entities=False  → não expande entidades (mitiga billion laughs)
+#   - no_network=True         → bloqueia acesso a recursos externos por URL
+#   - load_dtd=False          → ignora DTD inline
+#   - dtd_validation=False    → não valida via DTD
+#   - huge_tree=False         → limites de profundidade/tamanho do libxml2
+# Lazy-init no primeiro uso para não falhar caso lxml não esteja disponível
+# durante import do módulo (ambientes de bootstrap/CLI).
+_SAFE_XML_PARSER = None
+
+
+def _get_safe_xml_parser():
+    """Retorna o parser XML seguro do módulo (lazy-init na primeira chamada)."""
+    global _SAFE_XML_PARSER
+    if _SAFE_XML_PARSER is None:
+        from lxml import etree
+
+        _SAFE_XML_PARSER = etree.XMLParser(
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+            dtd_validation=False,
+            huge_tree=False,
+        )
+    return _SAFE_XML_PARSER
+
+
 # =============================================================================
 # Dataclasses de retorno
 # =============================================================================
@@ -103,10 +138,886 @@ class ResultadoEmissao:
 
 
 # =============================================================================
-# FUNÇÃO PRINCIPAL — chamada pelo webhook_server
+# DISPATCHER POR PROTOCOLO (ADR-0005, Parte A)
+# =============================================================================
+# `emitir_nfse` é a fronteira pública chamada pelo webhook_server. A partir do
+# ADR-0005 ela apenas SELECIONA o backend de emissão conforme settings.nfse_padrao
+# e delega — sem nenhuma lógica de protocolo aqui. Isso preserva 100% o
+# comportamento atual (caminho "nacional"/DPS) e cria o ponto de extensão para o
+# backend ABRASF 2.04 (RPS), implementado na Parte B.
+#
+# Contrato preservado (do qual processar_pagamento e o WEB-011 dependem):
+#   - assinatura: async def emitir_nfse(invoice, empresa)
+#   - retorno: dict com a chave "sucesso" (ResultadoEmissao.to_dict())
 # =============================================================================
 async def emitir_nfse(invoice: dict[str, Any], empresa: Empresa) -> dict[str, Any]:
-    """Emite uma NFS-e no DF para uma fatura já paga da Iugu.
+    """Emite uma NFS-e no DF, despachando para o backend do protocolo configurado.
+
+    Lê `settings.nfse_padrao`:
+        - "nacional"  → `_emitir_nacional` (Padrão Nacional / DPS v1.01 — atual)
+        - "abrasf204" → `_emitir_abrasf204` (RPS ABRASF 2.04 — stub na Parte A)
+
+    Args:
+        invoice: payload completo da fatura da Iugu (tem payer_address_*, payer_name, etc.)
+        empresa: dados cadastrais da empresa tomadora.
+
+    Returns:
+        Resultado em dict (ResultadoEmissao.to_dict()), idêntico em ambos os backends.
+    """
+    padrao = (settings.nfse_padrao or "nacional").lower()
+    if padrao == "abrasf204":
+        return await _emitir_abrasf204(invoice, empresa)
+    # Default e fallback: caminho nacional (comportamento de produção atual).
+    return await _emitir_nacional(invoice, empresa)
+
+
+# =============================================================================
+# ADR-0005 Parte B — BACKEND ABRASF 2.04 (RPS, ISSnet DF)
+# =============================================================================
+# Backend de emissão para o webservice ABRASF 2.04 do DF (ISSnet), operação
+# síncrona `GerarNfse` (1 RPS série 3 → 1 NFS-e). Espelha o plumbing do backend
+# nacional (assinatura A1, mTLS httpx, arquivamento, PDF, lock do contador), mas
+# monta o XML RPS conforme o XSD ABRASF 2.04 (schema nfse v2-04.xsd) — SEM IBSCBS
+# e SEM patch v1.00→v1.01.
+#
+# Devolve EXATAMENTE o mesmo contrato (ResultadoEmissao.to_dict()), com a chave
+# "sucesso", para o webhook (processar_pagamento / WEB-011) não perceber diferença.
+# Em rejeição retorna sucesso=False SEM levantar exceção (rejeição terminal).
+#
+# Namespaces / SOAPAction como CONSTANTES no topo da seção: o ISSnet DF pode
+# divergir do genérico ABRASF; centralizar facilita ajuste após validação no
+# canal integracao.df@notacontrol.com.br.
+# =============================================================================
+
+# Namespace do SCHEMA dos dados (RPS, GerarNfseEnvio, GerarNfseResposta). Vem do
+# `targetNamespace` do XSD ABRASF 2.04 (schema nfse v2-04.xsd).
+ABRASF_SCHEMA_NS = "http://www.abrasf.org.br/nfse.xsd"
+# Namespace do SERVIÇO SOAP (operações, nfseCabecMsg/nfseDadosMsg). Vem do WSDL
+# (targetNamespace="http://nfse.abrasf.org.br"). ⚠️ NÃO confundir com o do schema.
+ABRASF_SERVICE_NS = "http://nfse.abrasf.org.br"
+# Operação síncrona escolhida (1 RPS → 1 NFS-e), alinhada a "1 fatura paga → 1 NFS-e".
+ABRASF_OPERACAO = "GerarNfse"
+# SOAPAction da operação (conforme binding document/literal do WSDL).
+ABRASF_SOAP_ACTION = f"{ABRASF_SERVICE_NS}/{ABRASF_OPERACAO}"
+# Versão do leiaute ABRASF informada no cabeçalho (tsVersao = "[1-9][0-9]?\.[0-9]{2}").
+ABRASF_VERSAO_DADOS = "2.04"
+
+
+async def _emitir_abrasf204(invoice: dict[str, Any], empresa: Empresa) -> dict[str, Any]:
+    """Emite uma NFS-e no DF via ABRASF 2.04 (RPS série 3, ISSnet) para uma fatura paga.
+
+    Fluxo (espelha o backend nacional, trocando só a montagem/protocolo do XML):
+        1. Valida config + valor
+        2. Monta o RPS (GerarNfseEnvio > Rps > InfDeclaracaoPrestacaoServico) — XSD 2.04
+        3. Assina o RPS (XMLDSig enveloped, RSA-SHA1/SHA1/C14N) referenciando o Id
+        4. Envelopa em SOAP (nfseCabecMsg + nfseDadosMsg), operação GerarNfse
+        5. Envia via httpx com mTLS ao endpoint ABRASF (homologação/produção)
+        6. Parseia GerarNfseResposta (Numero/CodigoVerificacao ou ListaMensagemRetorno)
+        7. Arquiva envio+retorno e gera PDF (e-mail é disparado por processar_pagamento)
+
+    Returns:
+        Resultado em dict (ResultadoEmissao.to_dict()), idêntico ao backend nacional.
+    """
+    if not ERPBRASIL_DISPONIVEL:
+        return ResultadoEmissao(
+            sucesso=False,
+            mensagem_erro="Dependência ausente. Rode: pip install erpbrasil.assinatura",
+        ).to_dict()
+
+    # 1. Validação básica (mesma do nacional — config + valor da fatura)
+    total_cents = int(
+        invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
+    )
+    if total_cents <= 0:
+        return ResultadoEmissao(
+            sucesso=False,
+            mensagem_erro="Valor da fatura inválido ou zero",
+        ).to_dict()
+
+    problemas = _validar_configuracao(empresa)
+    if problemas:
+        return ResultadoEmissao(
+            sucesso=False,
+            mensagem_erro="Configuração incompleta: " + "; ".join(problemas),
+        ).to_dict()
+
+    # 2. Dados do serviço (prioridade: empresa > resumo de itens > default .env)
+    servico = DadosServico(
+        codigo_servico=empresa.codigo_servico or settings.nfse_codigo_servico_padrao,
+        descricao=empresa.descricao_servico or _resumir_itens(invoice) or settings.nfse_descricao_servico_padrao,
+        valor_cents=total_cents,
+        aliquota_iss=empresa.aliquota_iss or settings.nfse_aliquota_iss_padrao,
+    )
+    endereco_tomador = extrair_endereco_tomador(invoice)
+
+    logger.info(
+        f"[NFS-e ABRASF 2.04] Iniciando emissão: tomador={empresa.razao_social} "
+        f"valor={format_cents_to_br(total_cents)} "
+        f"serviço={servico.codigo_servico} "
+        f"série RPS={settings.nfse_serie_rps} "
+        f"ambiente={settings.nfse_ambiente}"
+        f"{' [DRY-RUN]' if settings.nfse_dry_run else ''}"
+    )
+
+    resultado = ResultadoEmissao(sucesso=False, ambiente=settings.nfse_ambiente)
+
+    # 3. Montar o RPS (GerarNfseEnvio) e assinar
+    try:
+        numero_rps = _proximo_numero_rps()
+        xml_envio, rps_id = _montar_xml_rps_abrasf(
+            empresa=empresa,
+            servico=servico,
+            endereco_tomador=endereco_tomador,
+            invoice=invoice,
+            numero_rps=numero_rps,
+        )
+    except Exception as exc:
+        logger.exception("Falha ao montar RPS ABRASF 2.04")
+        resultado.mensagem_erro = f"Erro ao montar RPS: {exc}"
+        return resultado.to_dict()
+
+    try:
+        # No GerarNfse assina-se o RPS (InfDeclaracaoPrestacaoServico). A Signature
+        # fica como irmã de InfDeclaracaoPrestacaoServico dentro de <Rps>, conforme
+        # tcDeclaracaoPrestacaoServico (InfDeclaracaoPrestacaoServico + dsig:Signature).
+        xml_assinado = _assinar_xml(xml_envio, rps_id)
+        # erpbrasil.assinatura insere a <Signature> no nó RAIZ (GerarNfseEnvio),
+        # como irmã de <Rps>. O XSD ABRASF 2.04 (tcDeclaracaoPrestacaoServico)
+        # exige a Signature como FILHA de <Rps> (irmã de InfDeclaracaoPrestacaoServico).
+        # Reposicionamos antes de envelopar/enviar — sem isso o ISSnet rejeita com E160.
+        xml_assinado = _reposicionar_signature_dentro_de_rps(xml_assinado)
+    except Exception as exc:
+        logger.exception("Falha ao assinar RPS ABRASF 2.04")
+        resultado.mensagem_erro = f"Erro ao assinar XML: {exc}"
+        return resultado.to_dict()
+
+    # Arquiva o RPS assinado (conteúdo interno, sem envelope SOAP) — diagnóstico
+    try:
+        _arquivar(xml_assinado, prefix=f"rps_{numero_rps}", suffix="rps_assinado")
+    except Exception as exc:
+        logger.warning(f"Não foi possível arquivar RPS assinado: {exc}")
+
+    # 4 + DRY-RUN. Monta o envelope SOAP sempre (para arquivar), mas só envia se
+    # dry-run estiver desligado — igual ao backend nacional.
+    envelope = _envelopar_soap_abrasf(xml_assinado)
+
+    if settings.nfse_dry_run:
+        try:
+            resultado.xml_enviado_path = _arquivar(
+                envelope, prefix=f"rps_{numero_rps}", suffix="envelope_dryrun"
+            )
+        except Exception as exc:
+            logger.warning(f"Não foi possível arquivar envelope (dry-run): {exc}")
+        logger.info(
+            f"[NFS-e ABRASF 2.04 DRY-RUN] RPS {numero_rps} montado e assinado; "
+            f"envelope NÃO enviado (dry-run ativo)."
+        )
+        resultado.sucesso = True
+        resultado.numero_nfse = f"DRY-RUN-RPS-{numero_rps}"
+        resultado.ambiente = f"{settings.nfse_ambiente} (dry-run)"
+        resultado.mensagens = ["DRY-RUN ABRASF 2.04: RPS montado+assinado, não enviado"]
+        # Gera também o DANFSE de RASCUNHO (validação local do gerador de PDF).
+        # Sem número/código oficiais — usa placeholders. Falha não derruba o dry-run.
+        _gerar_pdf_dryrun_abrasf(resultado, empresa, servico, endereco_tomador, numero_rps)
+        return resultado.to_dict()
+
+    # 5. Enviar ao webservice ABRASF (mTLS), endpoint conforme ambiente
+    endpoint = _abrasf_endpoint()
+    if not endpoint:
+        resultado.mensagem_erro = (
+            "URL do webservice ABRASF 2.04 não configurada. Preencha "
+            "NFSE_WS_URL_ABRASF_HOMOLOGACAO / NFSE_WS_URL_ABRASF_PRODUCAO no .env."
+        )
+        return resultado.to_dict()
+
+    try:
+        resposta_xml, status_code = _enviar_soap_abrasf(envelope, endpoint)
+    except Exception as exc:
+        logger.exception("Falha ao enviar RPS ABRASF ao webservice")
+        resultado.mensagem_erro = f"Erro ao enviar ao webservice: {exc}"
+        return resultado.to_dict()
+
+    # 6. Arquivar envelope efetivamente enviado + retorno
+    try:
+        resultado.xml_enviado_path = _arquivar(
+            envelope, prefix=f"rps_{numero_rps}", suffix="enviado"
+        )
+    except Exception as exc:
+        logger.warning(f"Não foi possível arquivar envelope enviado: {exc}")
+    try:
+        resultado.xml_retorno_path = _arquivar(
+            resposta_xml, prefix=f"rps_{numero_rps}", suffix="retorno"
+        )
+    except Exception as exc:
+        logger.warning(f"Não foi possível arquivar retorno: {exc}")
+
+    if status_code >= 400:
+        resultado.mensagem_erro = (
+            f"Webservice ABRASF retornou HTTP {status_code}. "
+            f"Veja {resultado.xml_retorno_path}"
+        )
+        logger.error(
+            f"[NFS-e ABRASF 2.04] Webservice respondeu HTTP {status_code} para "
+            f"{endpoint} — retorno arquivado em {resultado.xml_retorno_path}"
+        )
+        return resultado.to_dict()
+
+    # 7. Parsear retorno (GerarNfseResposta — estrutura ABRASF 2.04)
+    try:
+        info = _parsear_resposta_abrasf(resposta_xml)
+        resultado.numero_nfse = info.get("numero_nfse")
+        resultado.codigo_verificacao = info.get("codigo_verificacao")
+        resultado.mensagens = info.get("mensagens", [])
+        resultado.sucesso = info.get("sucesso", False)
+        if not resultado.sucesso and not resultado.mensagem_erro:
+            resultado.mensagem_erro = (
+                info.get("mensagem_erro") or "NFS-e (ABRASF) não foi aprovada pelo ISS DF"
+            )
+    except Exception as exc:
+        logger.exception("Falha ao parsear retorno ABRASF")
+        resultado.mensagem_erro = f"Erro ao parsear retorno: {exc}"
+        return resultado.to_dict()
+
+    # 8. Em sucesso, gera o PDF (e-mail é disparado por processar_pagamento — não duplicar)
+    if resultado.sucesso:
+        logger.info(
+            f"[NFS-e ABRASF 2.04] Emissão OK: número {resultado.numero_nfse} "
+            f"código {resultado.codigo_verificacao}"
+        )
+        _gerar_pdf_resultado(resultado, empresa, servico, endereco_tomador)
+
+    return resultado.to_dict()
+
+
+def _abrasf_endpoint() -> str:
+    """Retorna a URL do webservice ABRASF 2.04 conforme o ambiente configurado."""
+    if settings.nfse_ambiente == "producao":
+        return settings.nfse_ws_url_abrasf_producao
+    return settings.nfse_ws_url_abrasf_homologacao
+
+
+# -----------------------------------------------------------------------------
+# Numeração de RPS série 3 (contador próprio, reutiliza o lock do contador da DPS)
+# -----------------------------------------------------------------------------
+_COUNTER_RPS_FILE = Path(settings.nfse_output_dir) / ".contador_rps.json"
+
+
+def _proximo_numero_rps() -> str:
+    """Incrementa atomicamente o contador de RPS (série 3) e retorna sem zeros à esquerda.
+
+    Reutiliza _adquirir_lock_contador/_liberar_lock_contador (lock ENTRE PROCESSOS,
+    o mesmo lockfile da DPS) para evitar números duplicados quando webhook e cron de
+    boletos rodam ao mesmo tempo. O número é gravado em arquivo separado
+    (.contador_rps.json) para não colidir com a numeração da DPS.
+
+    ⚠️ Numeração de RPS no DF: a faixa é solicitada/consultada no portal do ISSnet
+    (menu "Solicitação de Documentos Fiscais"). Este contador local deve operar
+    DENTRO da faixa liberada — alinhar o valor inicial com o Bruno antes de produção.
+    """
+    Path(settings.nfse_output_dir).mkdir(parents=True, exist_ok=True)
+    fd = _adquirir_lock_contador()
+    try:
+        if _COUNTER_RPS_FILE.exists():
+            data = json.loads(_COUNTER_RPS_FILE.read_text(encoding="utf-8"))
+        else:
+            data = {"ultimo_numero": 0}
+        data["ultimo_numero"] = int(data.get("ultimo_numero", 0)) + 1
+        _COUNTER_RPS_FILE.write_text(json.dumps(data), encoding="utf-8")
+        return str(data["ultimo_numero"])
+    finally:
+        _liberar_lock_contador(fd)
+
+
+# -----------------------------------------------------------------------------
+# Montagem do RPS no schema ABRASF 2.04 (via lxml — sem nfelib, sem IBSCBS)
+# -----------------------------------------------------------------------------
+def _montar_xml_rps_abrasf(
+    empresa: Empresa,
+    servico: DadosServico,
+    endereco_tomador: dict[str, str],
+    invoice: dict[str, Any],
+    numero_rps: str,
+) -> tuple[str, str]:
+    """Monta o XML `GerarNfseEnvio` (RPS série 3) conforme o XSD ABRASF 2.04.
+
+    Estrutura (todos os elementos no namespace ABRASF_SCHEMA_NS, elementFormDefault
+    qualified; respeitar a ORDEM exata do XSD):
+
+        GerarNfseEnvio
+          └── Rps (tcDeclaracaoPrestacaoServico)
+                └── InfDeclaracaoPrestacaoServico  Id="..."
+                      ├── Rps (tcInfRps  Id="...")
+                      │     ├── IdentificacaoRps (Numero, Serie, Tipo)
+                      │     ├── DataEmissao (date)
+                      │     └── Status (1=Normal)
+                      ├── Competencia (date)
+                      ├── Servico (tcDadosServico)
+                      │     ├── Valores (ValorServicos, ValorIss?, Aliquota?)
+                      │     ├── IssRetido (2=Não retido)
+                      │     ├── ItemListaServico (LC 116 — ex.: 01.07)
+                      │     ├── CodigoTributacaoMunicipio (ex.: 1071)
+                      │     ├── Discriminacao
+                      │     ├── CodigoMunicipio (5300108)
+                      │     └── ExigibilidadeISS (1=Exigível)
+                      ├── Prestador (CpfCnpj/Cnpj + InscricaoMunicipal)
+                      ├── TomadorServico (IdentificacaoTomador?, RazaoSocial, Endereco?, Contato?)
+                      ├── OptanteSimplesNacional (1=Sim)
+                      └── IncentivoFiscal (2=Não)
+
+    Returns:
+        (xml_str, rps_id) — rps_id é o Id de InfDeclaracaoPrestacaoServico, usado
+        como referência (#Id) da assinatura.
+    """
+    from lxml import etree
+
+    NS = ABRASF_SCHEMA_NS
+
+    def _el(parent, tag, text=None):
+        """Cria subelemento qualificado no namespace ABRASF; define texto se houver."""
+        e = etree.SubElement(parent, f"{{{NS}}}{tag}")
+        if text is not None:
+            e.text = str(text)
+        return e
+
+    # Identificadores: alfanuméricos curtos (tsIdTag, máx 255). Usamos prefixos
+    # legíveis + número do RPS para rastreabilidade nos arquivos arquivados.
+    inf_id = f"rps{numero_rps}"
+    rps_inf_id = f"id{numero_rps}"
+
+    cnpj_prestador = _so_digitos(settings.nfse_cnpj_prestador)
+    im_prestador = _so_digitos(settings.nfse_inscricao_municipal)
+    cnpj_tomador = _so_digitos(empresa.cnpj)
+
+    # Município do prestador (emissor) e do tomador.
+    cod_mun_prestador = (settings.nfse_codigo_municipio_emissor or "5300108").strip()
+    cod_mun_tomador = _codigo_ibge_por_cidade(
+        endereco_tomador.get("cidade", ""), endereco_tomador.get("uf", ""),
+        default=cod_mun_prestador,
+    )
+
+    hoje = date.today().isoformat()
+
+    # ---------- Raiz GerarNfseEnvio > Rps > InfDeclaracaoPrestacaoServico ----------
+    envio = etree.Element(f"{{{NS}}}GerarNfseEnvio", nsmap={None: NS})
+    rps_decl = _el(envio, "Rps")  # tcDeclaracaoPrestacaoServico
+    inf_decl = _el(rps_decl, "InfDeclaracaoPrestacaoServico")
+    inf_decl.set("Id", inf_id)
+
+    # ---------- Rps (tcInfRps) — IdentificacaoRps + DataEmissao + Status ----------
+    rps_inf = _el(inf_decl, "Rps")  # tcInfRps
+    rps_inf.set("Id", rps_inf_id)
+    ident_rps = _el(rps_inf, "IdentificacaoRps")
+    _el(ident_rps, "Numero", numero_rps)
+    _el(ident_rps, "Serie", (settings.nfse_serie_rps or "3"))
+    _el(ident_rps, "Tipo", "1")  # 1 = RPS
+    _el(rps_inf, "DataEmissao", hoje)
+    _el(rps_inf, "Status", "1")  # 1 = Normal
+
+    # ---------- Competencia ----------
+    _el(inf_decl, "Competencia", hoje)
+
+    # ---------- Servico (tcDadosServico) — ORDEM do XSD é obrigatória ----------
+    serv = _el(inf_decl, "Servico")
+    valores = _el(serv, "Valores")  # tcValoresDeclaracaoServico
+    valor_serv = _decimal_2(servico.valor_cents)
+    _el(valores, "ValorServicos", valor_serv)
+    # ValorIss: para Simples Nacional o ISS é recolhido no DAS; o valor calculado é
+    # informativo. ISS = base * (alíquota/100), arredondado a 2 casas.
+    valor_iss = f"{(servico.valor_cents / 100) * (servico.aliquota_iss / 100):.2f}"
+    _el(valores, "ValorIss", valor_iss)
+    # Aliquota (tsAliquota = decimal totalDigits=4, fractionDigits=2): percentual,
+    # ex.: 2.00 para 2%. ⚠️ NÃO é fração (0.02) — confirmado pelo XSD (máx 99.99).
+    _el(valores, "Aliquota", f"{servico.aliquota_iss:.2f}")
+    # IssRetido (tsSimNao): 2 = Não retido (tomador não retém ISS).
+    _el(serv, "IssRetido", "2")
+    # ItemListaServico (tsItemListaServico): subitem LC 116/2003 no formato "NN.NN".
+    _el(serv, "ItemListaServico", _formatar_item_lista_servico(servico.codigo_servico))
+    # CodigoTributacaoMunicipio (tsCodigoTributacao, string até 20) — ex.: "1071".
+    _el(serv, "CodigoTributacaoMunicipio", str(settings.nfse_codigo_trib_municipal))
+    # Discriminacao (obrigatório, máx 2000).
+    _el(serv, "Discriminacao", servico.descricao[:2000])
+    # CodigoMunicipio de prestação (IBGE) — Brasília 5300108.
+    _el(serv, "CodigoMunicipio", cod_mun_prestador)
+    # ExigibilidadeISS (tsExigibilidadeISS): 1 = Exigível.
+    _el(serv, "ExigibilidadeISS", "1")
+
+    # ---------- Prestador (tcIdentificacaoPessoaEmpresa) ----------
+    prest = _el(inf_decl, "Prestador")
+    cpfcnpj_prest = _el(prest, "CpfCnpj")
+    _el(cpfcnpj_prest, "Cnpj", cnpj_prestador)
+    if im_prestador:
+        _el(prest, "InscricaoMunicipal", im_prestador[:15])
+
+    # ---------- TomadorServico (tcDadosTomador) ----------
+    toma = _el(inf_decl, "TomadorServico")
+    if cnpj_tomador:
+        ident_toma = _el(toma, "IdentificacaoTomador")
+        cpfcnpj_toma = _el(ident_toma, "CpfCnpj")
+        # Tomador pode ser CNPJ (14) ou CPF (11).
+        if len(cnpj_tomador) == 14:
+            _el(cpfcnpj_toma, "Cnpj", cnpj_tomador)
+        elif len(cnpj_tomador) == 11:
+            _el(cpfcnpj_toma, "Cpf", cnpj_tomador)
+        else:
+            _el(cpfcnpj_toma, "Cnpj", cnpj_tomador.zfill(14)[:14])
+    _el(toma, "RazaoSocial", (empresa.razao_social or "TOMADOR")[:150])
+    # Endereco (tcEndereco) — todos os filhos obrigatórios exceto Complemento;
+    # só monta se houver dados mínimos (logradouro+cidade+CEP) para não enviar lixo.
+    cep = endereco_tomador.get("cep", "")
+    if endereco_tomador.get("logradouro") and endereco_tomador.get("cidade") and len(cep) == 8:
+        end = _el(toma, "Endereco")
+        _el(end, "Endereco", endereco_tomador["logradouro"][:125])
+        _el(end, "Numero", (endereco_tomador.get("numero") or "S/N")[:60])
+        if endereco_tomador.get("complemento"):
+            _el(end, "Complemento", endereco_tomador["complemento"][:60])
+        _el(end, "Bairro", (endereco_tomador.get("bairro") or "Centro")[:60])
+        _el(end, "CodigoMunicipio", cod_mun_tomador)
+        _el(end, "Uf", (endereco_tomador.get("uf") or "DF")[:2].upper())
+        _el(end, "Cep", cep)
+    # Contato (tcContato): só Email (sequência alternativa do choice) se houver.
+    if empresa.email:
+        contato = _el(toma, "Contato")
+        _el(contato, "Email", empresa.email[:80])
+
+    # ---------- OptanteSimplesNacional + IncentivoFiscal (obrigatórios) ----------
+    # 1 = Sim (MEGASUPORTE é optante do Simples Nacional).
+    _el(inf_decl, "OptanteSimplesNacional", "1")
+    # 2 = Não (sem incentivo fiscal).
+    _el(inf_decl, "IncentivoFiscal", "2")
+
+    xml_str = etree.tostring(envio, encoding="unicode", xml_declaration=False)
+    return xml_str, inf_id
+
+
+def _formatar_item_lista_servico(codigo_servico: str) -> str:
+    """Converte o código de serviço para o formato tsItemListaServico ('NN.NN').
+
+    O XSD ABRASF 2.04 enumera os subitens da LC 116/2003 no formato "NN.NN"
+    (ex.: "01.07"). Aceita entradas como "01.07", "0107", "010701" (cTribNac de 6
+    dígitos, do qual usamos os 4 primeiros) e normaliza para "NN.NN".
+
+    Exemplos:
+        "01.07"   → "01.07"
+        "0107"    → "01.07"
+        "010701"  → "01.07"   (cTribNac: item 01, subitem 07, desdobro 01)
+        "1.07"    → "01.07"
+    """
+    digits = _so_digitos(codigo_servico)
+    if len(digits) >= 4:
+        return f"{digits[:2]}.{digits[2:4]}"
+    if len(digits) == 3:
+        # "107" → item 01, subitem 07 (assume item de 1 dígito + subitem de 2)
+        return f"0{digits[0]}.{digits[1:3]}"
+    # Fallback: devolve o original (deixa o XSD/ISSnet rejeitar se inválido)
+    return codigo_servico
+
+
+# -----------------------------------------------------------------------------
+# Envelope SOAP ABRASF (nfseCabecMsg + nfseDadosMsg) — operação GerarNfse
+# -----------------------------------------------------------------------------
+def _envelopar_soap_abrasf(xml_rps_assinado: str) -> str:
+    """Embrulha o RPS assinado no envelope SOAP 1.1 do ISSnet/ABRASF 2.04.
+
+    O webservice ABRASF expõe operações com dois parâmetros string (ver WSDL):
+        nfseCabecMsg → cabeçalho com a versão do leiaute (2.04)
+        nfseDadosMsg → o GerarNfseEnvio assinado
+
+    O conteúdo de nfseDadosMsg é o XML aninhado (padrão ISSnet v2.04). Caso o
+    ISSnet DF exija CDATA, alternar para o ramo comentado abaixo após validação.
+
+    Args:
+        xml_rps_assinado: GerarNfseEnvio já assinado (Signature embutida no Rps).
+    """
+    # Remove declaração XML do corpo interno (não pode aparecer aninhada).
+    corpo = re.sub(r'<\?xml[^?]*\?>\s*', '', xml_rps_assinado).strip()
+
+    cabecalho = (
+        f'<cabecalho versao="{ABRASF_VERSAO_DADOS}" xmlns="{ABRASF_SCHEMA_NS}">'
+        f'<versaoDados>{ABRASF_VERSAO_DADOS}</versaoDados>'
+        f'</cabecalho>'
+    )
+
+    # Padrão ISSnet v2.04: XML aninhado (sem CDATA). Se o ISSnet exigir CDATA,
+    # trocar por: cabec = f'<![CDATA[{cabecalho}]]>' ; dados = f'<![CDATA[{corpo}]]>'
+    cabec_content = cabecalho
+    dados_content = corpo
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">\n'
+        '  <soap:Body>\n'
+        f'    <{ABRASF_OPERACAO} xmlns="{ABRASF_SERVICE_NS}">\n'
+        f'      <nfseCabecMsg>{cabec_content}</nfseCabecMsg>\n'
+        f'      <nfseDadosMsg>{dados_content}</nfseDadosMsg>\n'
+        f'    </{ABRASF_OPERACAO}>\n'
+        '  </soap:Body>\n'
+        '</soap:Envelope>\n'
+    )
+
+
+# -----------------------------------------------------------------------------
+# Pós-processamento da Signature (ABRASF 2.04 exige Signature DENTRO de <Rps>)
+# -----------------------------------------------------------------------------
+DSIG_NS = "http://www.w3.org/2000/09/xmldsig#"
+
+
+def _reposicionar_signature_dentro_de_rps(xml_assinado: str) -> str:
+    """Move a <Signature> do XMLDSig para dentro de <Rps> (XSD ABRASF 2.04).
+
+    `erpbrasil.assinatura` insere a <Signature> como filha do nó RAIZ da árvore
+    fornecida (no nosso caso `GerarNfseEnvio`), ficando como IRMÃ de `<Rps>`.
+    Mas o tipo `tcDeclaracaoPrestacaoServico` do XSD ABRASF 2.04 exige a
+    sequência (InfDeclaracaoPrestacaoServico, dsig:Signature?) — ou seja, a
+    Signature precisa ser FILHA de `<Rps>` (irmã de InfDeclaracaoPrestacaoServico).
+    Sem este reposicionamento o ISSnet rejeita o RPS com E160.
+
+    A busca é tolerante a namespace (`etree.QName(el).localname`) para funcionar
+    independente de como o assinador serializou o XML. Se a Signature já estiver
+    no lugar correto (ou ausente), o XML é retornado inalterado.
+
+    Args:
+        xml_assinado: GerarNfseEnvio já assinado, como string UTF-8 sem
+            declaração XML (formato produzido por `_assinar_xml`).
+
+    Returns:
+        XML com a Signature movida para dentro de `<Rps>`, serializado sem
+        declaração XML (mesmo formato de saída do `_assinar_xml`).
+    """
+    from lxml import etree
+
+    # Parser seguro (defesa em profundidade contra XXE — Fix 2.2).
+    root = etree.fromstring(xml_assinado.encode("utf-8"), parser=_get_safe_xml_parser())
+
+    # Localiza a <Signature> pelo localname + namespace XMLDSig (tolerante a prefixo).
+    signature = None
+    for el in root.iter():
+        qn = etree.QName(el)
+        if qn.localname == "Signature" and qn.namespace == DSIG_NS:
+            signature = el
+            break
+    if signature is None:
+        # Nenhuma Signature presente — nada a fazer (caminho não esperado, mas
+        # mantemos idempotência: devolvemos o XML como veio).
+        return xml_assinado
+
+    # Localiza <InfDeclaracaoPrestacaoServico> (filho de <Rps>) por localname.
+    inf_decl = None
+    for el in root.iter():
+        if etree.QName(el).localname == "InfDeclaracaoPrestacaoServico":
+            inf_decl = el
+            break
+    if inf_decl is None:
+        # Estrutura inesperada — devolve o XML como veio em vez de mascarar o erro.
+        logger.warning(
+            "Signature presente mas InfDeclaracaoPrestacaoServico não encontrado; "
+            "reposicionamento da Signature ignorado."
+        )
+        return xml_assinado
+
+    rps_pai = inf_decl.getparent()  # esperado: o <Rps> (tcDeclaracaoPrestacaoServico)
+    if rps_pai is None:
+        logger.warning(
+            "InfDeclaracaoPrestacaoServico sem pai — reposicionamento da Signature ignorado."
+        )
+        return xml_assinado
+
+    # Já está no lugar certo? Mantém ordem (Inf... primeiro, Signature depois).
+    if signature.getparent() is rps_pai:
+        return xml_assinado
+
+    # Move: remove do pai atual e faz append no <Rps>. O append garante que a
+    # Signature fique APÓS InfDeclaracaoPrestacaoServico, respeitando a sequência
+    # exigida pelo XSD.
+    signature.getparent().remove(signature)
+    rps_pai.append(signature)
+
+    return etree.tostring(root, encoding="unicode", xml_declaration=False)
+
+
+def _enviar_soap_abrasf(envelope: str, endpoint: str) -> tuple[str, int]:
+    """Envia o envelope SOAP ABRASF ao endpoint do ISSnet via httpx com mTLS.
+
+    Reutiliza _pkcs12_to_pem_tempfiles (mesmo certificado A1 do backend nacional)
+    para o handshake mútuo. Remove os arquivos PEM temporários no finally.
+
+    Returns:
+        (corpo_da_resposta, status_code_http)
+    """
+    cert_path = Path(settings.nfse_certificado_path)
+    senha = settings.nfse_certificado_senha
+    cert_file, key_file = _pkcs12_to_pem_tempfiles(cert_path, senha)
+
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": f'"{ABRASF_SOAP_ACTION}"',
+    }
+    try:
+        logger.info(
+            f"Enviando RPS (SOAP — {ABRASF_OPERACAO}, ABRASF 2.04) para {endpoint}"
+        )
+        with httpx.Client(
+            cert=(str(cert_file), str(key_file)) if cert_file.exists() else None,
+            timeout=60.0,
+            verify=True,
+        ) as client:
+            response = client.post(
+                endpoint, content=envelope.encode("utf-8"), headers=headers
+            )
+        return response.text, response.status_code
+    finally:
+        # Garante remoção dos PEMs temporários do cert/chave A1 — material
+        # sensível, não deixar órfão no /tmp. Falhas raras (lock no Windows,
+        # arquivo já removido) viram WARNING para auditoria, em vez de
+        # silenciar (Fix 2.1 — defesa em profundidade).
+        for f in (cert_file, key_file):
+            try:
+                if f and f.exists():
+                    f.unlink()
+            except Exception as exc:
+                logger.warning(
+                    f"Falha ao remover PEM temporário {f}: {exc}"
+                )
+
+
+# -----------------------------------------------------------------------------
+# Parsing do retorno GerarNfseResposta (ABRASF 2.04) — tolerante a namespace
+# -----------------------------------------------------------------------------
+def _parsear_resposta_abrasf(xml_resposta: str) -> dict[str, Any]:
+    """Extrai dados de GerarNfseResposta (ABRASF 2.04), buscando por localname.
+
+    Estrutura esperada (XSD ABRASF 2.04):
+        GerarNfseResposta
+          ├── ListaNfse                      (sucesso)
+          │     └── CompNfse > Nfse > InfNfse
+          │           ├── Numero             ← número da NFS-e
+          │           ├── CodigoVerificacao  ← código de verificação
+          │           └── ...
+          │     └── ListaMensagemAlertaRetorno?  (avisos não-fatais)
+          └── ListaMensagemRetorno           (erros — RPS rejeitado)
+                └── MensagemRetorno (Codigo, Mensagem, Correcao?)
+
+    Sucesso = presença de <Numero> dentro de <InfNfse>. O envelope SOAP é
+    transparentemente ignorado pela busca por localname.
+    """
+    from lxml import etree
+
+    try:
+        # Fix 2.2 — parser seguro (anti-XXE, sem rede, sem DTD inline). A resposta
+        # do webservice ABRASF/ISSnet vem de fonte externa e nunca deve resolver
+        # entidades externas nem buscar recursos por URL.
+        root = etree.fromstring(xml_resposta.encode("utf-8"), parser=_get_safe_xml_parser())
+    except Exception as exc:
+        return {
+            "sucesso": False,
+            "mensagem_erro": f"Retorno não é XML válido: {exc}",
+            "mensagens": [],
+        }
+
+    def _iter_local(tag: str):
+        for el in root.iter():
+            if etree.QName(el).localname == tag:
+                yield el
+
+    # 1. Número + código de verificação: buscar dentro de InfNfse (evita pegar o
+    #    Numero do IdentificacaoRps, que também se chama "Numero").
+    numero_nfse = None
+    codigo_verif = None
+    for inf in _iter_local("InfNfse"):
+        for child in inf.iter():
+            ln = etree.QName(child).localname
+            if ln == "Numero" and numero_nfse is None and child.text:
+                numero_nfse = child.text.strip()
+            elif ln == "CodigoVerificacao" and codigo_verif is None and child.text:
+                codigo_verif = child.text.strip()
+        if numero_nfse:
+            break
+
+    # 2. Mensagens de rejeição (ListaMensagemRetorno) e alerta (ListaMensagemAlertaRetorno)
+    mensagens_erro: list[str] = []
+    mensagens_alerta: list[str] = []
+
+    for lista in _iter_local("ListaMensagemRetorno"):
+        for msg in lista.iter():
+            if etree.QName(msg).localname == "MensagemRetorno":
+                codigo = _text_child(msg, "Codigo")
+                texto = _text_child(msg, "Mensagem")
+                correcao = _text_child(msg, "Correcao")
+                if texto:
+                    full = f"[{codigo or '?'}] {texto}"
+                    if correcao:
+                        full += f" — Correção: {correcao}"
+                    mensagens_erro.append(full)
+
+    for lista in _iter_local("ListaMensagemAlertaRetorno"):
+        for msg in lista.iter():
+            if etree.QName(msg).localname == "MensagemRetorno":
+                codigo = _text_child(msg, "Codigo")
+                texto = _text_child(msg, "Mensagem")
+                if texto:
+                    mensagens_alerta.append(f"[{codigo or '?'}] {texto}")
+
+    sucesso = bool(numero_nfse)
+    todas_mensagens = mensagens_erro + mensagens_alerta
+
+    mensagem_erro = None
+    if not sucesso:
+        if mensagens_erro:
+            mensagem_erro = mensagens_erro[0]
+        elif mensagens_alerta:
+            mensagem_erro = mensagens_alerta[0]
+        else:
+            fault = None
+            for tag in ("faultstring", "Reason", "Text"):
+                fault = fault or next(
+                    (e.text.strip() for e in _iter_local(tag) if e.text), None
+                )
+            mensagem_erro = fault or "NFS-e (ABRASF) não aprovada (sem mensagem explícita)"
+
+    return {
+        "sucesso": sucesso,
+        "numero_nfse": numero_nfse,
+        "codigo_verificacao": codigo_verif,
+        "mensagens": todas_mensagens,
+        "mensagens_erro": mensagens_erro,
+        "mensagens_alerta": mensagens_alerta,
+        "mensagem_erro": mensagem_erro,
+    }
+
+
+# -----------------------------------------------------------------------------
+# Geração de PDF (reutiliza pdf_nfse — extraído para reuso entre backends)
+# -----------------------------------------------------------------------------
+def _gerar_pdf_resultado(
+    resultado: ResultadoEmissao,
+    empresa: Empresa,
+    servico: DadosServico,
+    endereco_tomador: dict[str, str],
+) -> None:
+    """Gera o DANFSE em PDF a partir de um ResultadoEmissao aprovado.
+
+    Falha não interrompe o fluxo (PDF é complementar). Reutiliza pdf_nfse.gerar_pdf_nfse,
+    o mesmo gerador do backend nacional, mantendo o layout consistente entre protocolos.
+    """
+    try:
+        from .pdf_nfse import gerar_pdf_nfse
+
+        pdf_path = Path(settings.nfse_output_dir) / f"NFS-e_{resultado.numero_nfse}.pdf"
+        valor_formatado = f"R$ {servico.valor_cents / 100:.2f}".replace('.', ',')
+        endereco_str = (
+            f"{endereco_tomador.get('logradouro', '')} "
+            f"{endereco_tomador.get('numero', '')} "
+            f"{endereco_tomador.get('bairro', '')}, "
+            f"{endereco_tomador.get('cidade', '')} - "
+            f"{endereco_tomador.get('uf', '')}"
+        )
+        url_validacao = (
+            f"https://iss.fazenda.df.gov.br/online/consultarNFSe.aspx?"
+            f"id={resultado.numero_nfse}&cod={resultado.codigo_verificacao}"
+        )
+        sucesso_pdf = gerar_pdf_nfse(
+            pdf_path=pdf_path,
+            numero_nfse=resultado.numero_nfse,
+            serie=settings.nfse_serie_rps,
+            data_emissao=datetime.now().strftime('%d/%m/%Y'),
+            codigo_verificacao=resultado.codigo_verificacao,
+            tomador_nome=empresa.razao_social,
+            tomador_cnpj=empresa.cnpj,
+            tomador_endereco=endereco_str,
+            descricao_servico=servico.descricao[:100],
+            valor_servico=valor_formatado,
+            aliquota_iss=servico.aliquota_iss,
+            prestador_nome=settings.nfse_razao_social_prestador,
+            prestador_cnpj=settings.nfse_cnpj_prestador,
+            url_validacao=url_validacao,
+        )
+        if sucesso_pdf:
+            resultado.pdf_path = pdf_path
+            logger.info(f"[NFS-e PDF] Gerado com sucesso: {pdf_path}")
+        else:
+            logger.warning("[NFS-e PDF] Falha ao gerar PDF (continuando sem PDF)")
+    except ImportError:
+        logger.warning("Módulo pdf_nfse não disponível — PDF não será gerado")
+    except Exception as exc:
+        logger.warning(f"Falha ao gerar PDF da NFS-e: {exc} (continuando sem PDF)")
+
+
+def _gerar_pdf_dryrun_abrasf(
+    resultado: ResultadoEmissao,
+    empresa: Empresa,
+    servico: DadosServico,
+    endereco_tomador: dict[str, str],
+    numero_rps: str,
+) -> None:
+    """Gera um DANFSE de RASCUNHO no dry-run ABRASF 2.04 (validação local, sem rede).
+
+    Diferente de `_gerar_pdf_resultado` (que usa o número/código oficiais vindos da
+    Receita), aqui ainda NÃO houve envio: usamos placeholders explícitos no lugar do
+    número da NFS-e e do código de verificação, para que o PDF deixe inequívoco que é
+    um rascunho sem valor fiscal. O objetivo é só validar localmente que o gerador de
+    PDF roda com os dados do RPS já montados — o XML continua sendo o entregável principal.
+
+    Reutiliza `pdf_nfse.gerar_pdf_nfse` (o mesmo gerador do fluxo real, sem criar nada
+    novo). Falha aqui é tolerada: loga warning e segue, pois o dry-run não pode ser
+    derrubado por um problema no PDF complementar.
+    """
+    try:
+        from .pdf_nfse import gerar_pdf_nfse
+
+        # Nome do arquivo com sufixo "_dryrun" — deixa claro no disco que é rascunho,
+        # mesmo que alguém abra só a pasta nfse_emitidas/ sem ler o conteúdo.
+        pdf_path = (
+            Path(settings.nfse_output_dir) / f"NFS-e_DRY-RUN-RPS-{numero_rps}_dryrun.pdf"
+        )
+        valor_formatado = f"R$ {servico.valor_cents / 100:.2f}".replace('.', ',')
+        endereco_str = (
+            f"{endereco_tomador.get('logradouro', '')} "
+            f"{endereco_tomador.get('numero', '')} "
+            f"{endereco_tomador.get('bairro', '')}, "
+            f"{endereco_tomador.get('cidade', '')} - "
+            f"{endereco_tomador.get('uf', '')}"
+        )
+        sucesso_pdf = gerar_pdf_nfse(
+            pdf_path=pdf_path,
+            # Placeholders no lugar do número/código oficiais (que só viriam da Receita).
+            numero_nfse=f"RASCUNHO (DRY-RUN RPS {numero_rps})",
+            serie=settings.nfse_serie_rps,
+            data_emissao=datetime.now().strftime('%d/%m/%Y'),
+            codigo_verificacao="SEM VALOR FISCAL",
+            tomador_nome=empresa.razao_social,
+            tomador_cnpj=empresa.cnpj,
+            tomador_endereco=endereco_str,
+            descricao_servico=servico.descricao[:100],
+            valor_servico=valor_formatado,
+            aliquota_iss=servico.aliquota_iss,
+            prestador_nome=settings.nfse_razao_social_prestador,
+            prestador_cnpj=settings.nfse_cnpj_prestador,
+            # Sem URL de validação: não existe NFS-e publicada para consultar no portal.
+            url_validacao=None,
+        )
+        if sucesso_pdf:
+            resultado.pdf_path = pdf_path
+            logger.info(f"[NFS-e PDF DRY-RUN] Rascunho gerado com sucesso: {pdf_path}")
+        else:
+            logger.warning(
+                "[NFS-e PDF DRY-RUN] Falha ao gerar PDF de rascunho (continuando sem PDF)"
+            )
+    except ImportError:
+        logger.warning("Módulo pdf_nfse não disponível — PDF de rascunho não será gerado")
+    except Exception as exc:
+        logger.warning(
+            f"Falha ao gerar PDF de rascunho (dry-run): {exc} (continuando sem PDF)"
+        )
+
+
+# =============================================================================
+# BACKEND NACIONAL — Padrão Nacional CGNFS-e (DPS v1.01)
+# =============================================================================
+# Este é exatamente o código que `emitir_nfse` executava antes do ADR-0005;
+# apenas movido para um backend nomeado, SEM qualquer mudança de lógica. Continua
+# sendo o caminho de produção atual (settings.nfse_padrao="nacional", default).
+# =============================================================================
+async def _emitir_nacional(invoice: dict[str, Any], empresa: Empresa) -> dict[str, Any]:
+    """Emite uma NFS-e no DF (Padrão Nacional / DPS) para uma fatura paga da Iugu.
 
     Args:
         invoice: payload completo da fatura da Iugu (tem payer_address_*, payer_name, etc.)
@@ -1073,12 +1984,17 @@ def _enviar_ao_webservice(xml_assinado: str, endpoint: str) -> tuple[str, int, s
 
         return response.text, response.status_code, envelope
     finally:
+        # Material sensível (chave privada A1) — não silenciar falha de unlink.
+        # Logamos como WARNING para auditoria, mesmo padrão do _enviar_soap_abrasf
+        # (Fix 2.1 — defesa em profundidade).
         for f in (cert_file, key_file):
             try:
                 if f and f.exists():
                     f.unlink()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    f"Falha ao remover PEM temporário {f}: {exc}"
+                )
 
 
 def _pkcs12_to_pem_tempfiles(pfx_path: Path, senha: str) -> tuple[Path, Path]:
@@ -1086,7 +2002,21 @@ def _pkcs12_to_pem_tempfiles(pfx_path: Path, senha: str) -> tuple[Path, Path]:
 
     Necessário porque httpx usa cert=(certfile, keyfile) e não aceita pkcs12 direto.
     Os arquivos temporários devem ser removidos pelo caller.
+
+    Hardening (Fix 2.1 — appsec):
+      - `tempfile.mkstemp()` em vez de `mktemp()`: criação ATÔMICA do arquivo
+        com permissões restritas (sem janela TOCTOU em que outro processo
+        pudesse criar o arquivo antes de nós).
+      - `os.chmod(0o600)` aplicado em POSIX após gravação (mkstemp já cria
+        com 0o600 no Linux, mas reforçamos por defesa em profundidade; em
+        Windows o chmod é no-op funcional — a proteção vem de %TEMP% ACL).
+      - A chave privada é serializada com `NoEncryption()` porque o httpx
+        (cliente mTLS) não consegue ler chave criptografada por padrão. A
+        segurança da chave em disco depende portanto de:
+          (a) permissão 0o600 do arquivo PEM e
+          (b) remoção imediata após o request (responsabilidade do caller).
     """
+    import os as _os
     import tempfile
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.serialization import pkcs12
@@ -1105,10 +2035,26 @@ def _pkcs12_to_pem_tempfiles(pfx_path: Path, senha: str) -> tuple[Path, Path]:
         encryption_algorithm=serialization.NoEncryption(),
     )
 
-    cert_file = Path(tempfile.mktemp(suffix="_cert.pem"))
-    key_file = Path(tempfile.mktemp(suffix="_key.pem"))
-    cert_file.write_bytes(cert_pem)
-    key_file.write_bytes(key_pem)
+    def _criar_pem_seguro(suffix: str, payload: bytes) -> Path:
+        # mkstemp cria o arquivo de forma atômica (O_CREAT|O_EXCL|O_RDWR);
+        # devolve fd já aberto que precisamos fechar após escrever.
+        fd, path_str = tempfile.mkstemp(suffix=suffix)
+        try:
+            _os.write(fd, payload)
+        finally:
+            _os.close(fd)
+        # POSIX: 0o600. Em Windows os.chmod só altera bit read-only; a proteção
+        # real vem das ACLs do diretório %TEMP% do usuário. Mantemos o chmod
+        # incondicional porque é no-op seguro no Windows.
+        try:
+            _os.chmod(path_str, 0o600)
+        except OSError:
+            # Não-fatal: o material continua restrito ao diretório do usuário.
+            pass
+        return Path(path_str)
+
+    cert_file = _criar_pem_seguro("_cert.pem", cert_pem)
+    key_file = _criar_pem_seguro("_key.pem", key_pem)
     return cert_file, key_file
 
 

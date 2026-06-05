@@ -27,6 +27,19 @@ Uso:
 
     # Força emissão mesmo se fatura não estiver paga (homologação)
     python scripts/emitir_nfse_manual.py <invoice_id> --forcar
+
+Backend ABRASF 2.04 (RPS série 3, ISSnet DF):
+    O backend é selecionado por NFSE_PADRAO ("nacional" | "abrasf204"). Com
+    NFSE_PADRAO=abrasf204, --dry-run monta+assina o RPS e arquiva o envelope SOAP
+    (GerarNfse) SEM enviar — caminho de homologação offline:
+
+    # PowerShell (dry-run ABRASF em homologação, sem rede)
+    $env:NFSE_PADRAO="abrasf204"; $env:NFSE_AMBIENTE="homologacao";
+    python scripts/emitir_nfse_manual.py --exemplo --dry-run
+
+    # Envio REAL em homologação ISSnet (sem --dry-run): POSTa o RPS de verdade
+    $env:NFSE_PADRAO="abrasf204"; $env:NFSE_AMBIENTE="homologacao";
+    python scripts/emitir_nfse_manual.py --exemplo
 """
 from __future__ import annotations
 
@@ -91,9 +104,54 @@ def _empresa_exemplo() -> Empresa:
     )
 
 
+async def _dry_run_abrasf204(invoice: dict, empresa: Empresa):
+    """DRY-RUN do backend ABRASF 2.04 (RPS série 3, ISSnet DF).
+
+    Diferente do dry-run nacional (que monta a DPS "à mão" para inspeção rápida),
+    aqui delegamos ao MESMO caminho de produção `emitir_nfse` → `_emitir_abrasf204`,
+    forçando apenas `settings.nfse_dry_run=True`. Assim exercitamos exatamente o
+    plumbing real (montagem do RPS, assinatura A1, reposicionamento da Signature,
+    envelope SOAP, arquivamento), só sem o POST de rede. Isso evita reimplementar
+    a lógica do backend aqui e garante que o que validamos é o que vai a produção.
+    """
+    from src.nfse_df import _abrasf_endpoint, ABRASF_OPERACAO, emitir_nfse
+
+    # Garante dry-run mesmo se o operador esqueceu NFSE_DRY_RUN no ambiente — o
+    # --dry-run da CLI é a fonte da verdade da intenção do operador.
+    settings.nfse_dry_run = True
+
+    endpoint = _abrasf_endpoint()
+    resultado = await emitir_nfse(invoice=invoice, empresa=empresa)
+
+    print("\n" + "=" * 64)
+    print("DRY-RUN ABRASF 2.04 (RPS série 3 — ISSnet DF)")
+    print("=" * 64)
+    print(f"Protocolo:  abrasf204")
+    print(f"Operação:   {ABRASF_OPERACAO} (SOAP síncrono)")
+    print(f"Ambiente:   {settings.nfse_ambiente}")
+    print(f"Endpoint:   {endpoint or '<não configurado no .env>'}")
+    print(f"            (seria usado SOMENTE fora do dry-run)")
+    print(f"Série RPS:  {settings.nfse_serie_rps}")
+    if resultado.get("sucesso"):
+        print(f"\n✅ RPS montado + assinado + envelopado (NÃO enviado — dry-run)")
+        print(f"   Número simulado: {resultado.get('numero_nfse')}")
+        print(f"   Envelope SOAP arquivado em: {resultado.get('xml_enviado_path')}")
+    else:
+        print(f"\n❌ Falha no dry-run: {resultado.get('mensagem_erro')}")
+    print("\n" + json.dumps(resultado, indent=2, ensure_ascii=False))
+    return
+
+
 async def _executar(invoice: dict, empresa: Empresa, dry_run: bool):
     """Executa o fluxo de emissão."""
     if dry_run:
+        # Despacho por protocolo: o backend ABRASF 2.04 tem montagem/assinatura
+        # próprias (RPS, não DPS). Sem este desvio, o --dry-run montaria sempre uma
+        # DPS nacional mesmo com NFSE_PADRAO=abrasf204 — silenciosamente errado.
+        if (settings.nfse_padrao or "nacional").lower() == "abrasf204":
+            return await _dry_run_abrasf204(invoice, empresa)
+
+        # Caminho nacional (DPS v1.01) — comportamento original preservado.
         # Importa lazy para evitar dependências pesadas no caminho de validação
         from src.nfse_df import (
             _assinar_xml,
