@@ -88,32 +88,32 @@ def _primeiro_e_ultimo_dia_mes(data_ref: date):
 
 
 def _contar_nfse_periodo(nfse_dir: Path, data_inicio: date, data_fim: date):
-    """Conta NFS-e emitidas e erros num periodo, varrendo a pasta de output."""
+    """Conta NFS-e emitidas e erros num periodo a partir dos LOGS reais.
+
+    Conta apenas emissões reais — arquivos `nfse_<invoice_id>.json` (gravados só
+    em emissão bem-sucedida), pela `data_emissao`. NÃO varre `dps_*`/`rps_*`, que
+    incluem dry-runs e artefatos de teste e inflavam o número (achado A-09).
+    """
     emitidas = 0
     erros = 0
     if not nfse_dir.exists():
         return emitidas, erros
-    for f in nfse_dir.iterdir():
-        if not f.is_file():
+    for f in nfse_dir.glob("nfse_*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
             continue
-        nome = f.name
-        for part in nome.split("_"):
-            if len(part) == 8 and part.isdigit():
-                try:
-                    file_date = date(int(part[:4]), int(part[4:6]), int(part[6:8]))
-                    if data_inicio <= file_date <= data_fim:
-                        if nome.startswith("dps_"):
-                            emitidas += 1
-                        elif nome.startswith("retorno_"):
-                            try:
-                                conteudo = f.read_text(encoding="utf-8", errors="ignore")
-                                if "erro" in conteudo.lower() or "rejeic" in conteudo.lower():
-                                    erros += 1
-                            except Exception:
-                                pass
-                except ValueError:
-                    pass
-                break
+        de = str(data.get("data_emissao") or "")[:10]  # aceita "YYYY-MM-DD" ou ISO
+        try:
+            d = date.fromisoformat(de) if de else None
+        except ValueError:
+            d = None
+        if d is None or not (data_inicio <= d <= data_fim):
+            continue
+        if data.get("sucesso"):
+            emitidas += 1
+        else:
+            erros += 1
     return emitidas, erros
 
 
@@ -208,18 +208,20 @@ async def dashboard(
     nfse_pendentes = 0
     nfse_pendentes_list = []
     mapa_nfse = _carregar_mapa_nfse()
-    cnpjs_nf_na_criacao = _carregar_cnpjs_nf_na_criacao()
     nfse_arquivos = set()
     if nfse_dir.exists():
         for f in nfse_dir.glob("dps_*"):
             nfse_arquivos.add(f.name)
     for fatura in items_pagas_mes:
         fatura_id = fatura.get("id", "")
+        # Evidencia por fatura: (1) log local / arquivo dps_ por invoice_id,
+        # (3) custom_variable na propria fatura. Sem usar o flag nf_na_criacao.
         tem_nfse = fatura_id in mapa_nfse or any(fatura_id in nome for nome in nfse_arquivos)
         if not tem_nfse:
-            cnpj_raw = (fatura.get("payer_cpf_cnpj") or "").replace(".", "").replace("/", "").replace("-", "").strip()
-            if cnpj_raw and cnpj_raw in cnpjs_nf_na_criacao:
-                tem_nfse = True
+            for var in (fatura.get("custom_variables") or []):
+                if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao" and var.get("value") == "true":
+                    tem_nfse = True
+                    break
         if not tem_nfse:
             nfse_pendentes += 1
             if len(nfse_pendentes_list) < 5:
@@ -341,16 +343,18 @@ async def listar_faturas(
 
     items = result.get("items", [])
     mapa_nfse = _carregar_mapa_nfse()
-    cnpjs_nf_na_criacao = _carregar_cnpjs_nf_na_criacao()
-    logger.debug(f"[NFS-e check] Logs locais: {len(mapa_nfse)} | CNPJs nf_na_criacao: {cnpjs_nf_na_criacao}")
+    logger.debug(f"[NFS-e check] Logs locais: {len(mapa_nfse)}")
 
     def _check_nfse(fatura: dict) -> bool:
+        # Detecta NFS-e por EVIDENCIA da propria fatura, nunca pelo flag
+        # nf_na_criacao da empresa: o flag diz que a empresa DEVERIA emitir na
+        # criacao, mas nao prova que esta fatura especifica tem nota. Confiar
+        # no flag marcava ate faturas pendentes/sem nota como "emitida".
         fatura_id = fatura.get("id", "")
+        # (1) Log local por invoice_id (nfse_<invoice_id>.json)
         if fatura_id in mapa_nfse:
             return True
-        cnpj_raw = (fatura.get("payer_cpf_cnpj") or "").replace(".", "").replace("/", "").replace("-", "").strip()
-        if cnpj_raw and cnpj_raw in cnpjs_nf_na_criacao:
-            return True
+        # (3) Custom_variable gravada na propria fatura quando a NF foi emitida
         for var in (fatura.get("custom_variables") or []):
             if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao":
                 if var.get("value") == "true":
@@ -392,14 +396,13 @@ async def detalhe_fatura(invoice_id: str):
             raise HTTPException(404, "Fatura nao encontrada")
         raise HTTPException(502, f"Erro Iugu: {e.message}")
 
+    # Detecta NFS-e por EVIDENCIA da propria fatura (log local + custom_variable),
+    # nunca pelo flag nf_na_criacao da empresa — vide _check_nfse em listar_faturas.
     nfse_info = _buscar_nfse_da_fatura(invoice_id)
 
+    # (1) Log local por invoice_id
     nfse_emitida = nfse_info is not None
-    if not nfse_emitida:
-        cnpj_raw = (invoice.get("payer_cpf_cnpj") or "").replace(".", "").replace("/", "").replace("-", "").strip()
-        cnpjs_nf_na_criacao = _carregar_cnpjs_nf_na_criacao()
-        if cnpj_raw and cnpj_raw in cnpjs_nf_na_criacao:
-            nfse_emitida = True
+    # (3) Custom_variable gravada na propria fatura
     if not nfse_emitida:
         for var in (invoice.get("custom_variables") or []):
             if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao":
@@ -943,20 +946,6 @@ def _buscar_nfse_da_fatura(invoice_id: str) -> Optional[dict]:
         }
 
     return None
-
-
-def _carregar_cnpjs_nf_na_criacao() -> set[str]:
-    """Retorna set de CNPJs com nf_na_criacao=True."""
-    try:
-        repo = get_repo()
-        return {
-            e.cnpj
-            for e in repo._empresas.values()
-            if e.nf_na_criacao and e.ativo and e.emitir_nf
-        }
-    except Exception as exc:
-        logger.warning(f"Erro ao carregar empresas para nf_na_criacao: {exc}")
-        return set()
 
 
 def _carregar_mapa_nfse() -> dict[str, dict]:
