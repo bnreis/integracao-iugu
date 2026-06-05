@@ -214,14 +214,11 @@ async def dashboard(
             nfse_arquivos.add(f.name)
     for fatura in items_pagas_mes:
         fatura_id = fatura.get("id", "")
-        # Evidencia por fatura: (1) log local / arquivo dps_ por invoice_id,
-        # (3) custom_variable na propria fatura. Sem usar o flag nf_na_criacao.
+        # Evidencia confiavel = log de emissao real (nfse_<invoice_id>.json) por
+        # invoice_id. A custom_variable nfse_emitida_na_criacao foi REMOVIDA da
+        # deteccao: era gravada na criacao do boleto mesmo sem emissao real,
+        # gerando falso-positivo em faturas antigas.
         tem_nfse = fatura_id in mapa_nfse or any(fatura_id in nome for nome in nfse_arquivos)
-        if not tem_nfse:
-            for var in (fatura.get("custom_variables") or []):
-                if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao" and var.get("value") == "true":
-                    tem_nfse = True
-                    break
         if not tem_nfse:
             nfse_pendentes += 1
             if len(nfse_pendentes_list) < 5:
@@ -351,15 +348,11 @@ async def listar_faturas(
         # criacao, mas nao prova que esta fatura especifica tem nota. Confiar
         # no flag marcava ate faturas pendentes/sem nota como "emitida".
         fatura_id = fatura.get("id", "")
-        # (1) Log local por invoice_id (nfse_<invoice_id>.json)
-        if fatura_id in mapa_nfse:
-            return True
-        # (3) Custom_variable gravada na propria fatura quando a NF foi emitida
-        for var in (fatura.get("custom_variables") or []):
-            if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao":
-                if var.get("value") == "true":
-                    return True
-        return False
+        # Evidencia confiavel = log de emissao real por invoice_id
+        # (nfse_<invoice_id>.json), gravado SO em emissao bem-sucedida. A
+        # custom_variable nfse_emitida_na_criacao foi REMOVIDA da deteccao: era
+        # setada na criacao mesmo sem emissao real (falso-positivo em antigas).
+        return fatura_id in mapa_nfse
 
     return {
         "total": result.get("totalItems", len(items)),
@@ -396,19 +389,12 @@ async def detalhe_fatura(invoice_id: str):
             raise HTTPException(404, "Fatura nao encontrada")
         raise HTTPException(502, f"Erro Iugu: {e.message}")
 
-    # Detecta NFS-e por EVIDENCIA da propria fatura (log local + custom_variable),
-    # nunca pelo flag nf_na_criacao da empresa — vide _check_nfse em listar_faturas.
+    # Detecta NFS-e SO por evidencia de emissao real: log local por invoice_id
+    # (nfse_<invoice_id>.json). A custom_variable nfse_emitida_na_criacao foi
+    # REMOVIDA da deteccao (era gravada na criacao mesmo sem emissao real,
+    # gerando falso-positivo), e nunca usamos o flag nf_na_criacao da empresa.
     nfse_info = _buscar_nfse_da_fatura(invoice_id)
-
-    # (1) Log local por invoice_id
     nfse_emitida = nfse_info is not None
-    # (3) Custom_variable gravada na propria fatura
-    if not nfse_emitida:
-        for var in (invoice.get("custom_variables") or []):
-            if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao":
-                if var.get("value") == "true":
-                    nfse_emitida = True
-                    break
 
     bank_slip = invoice.get("bank_slip") or {}
     pix = invoice.get("pix") or {}
