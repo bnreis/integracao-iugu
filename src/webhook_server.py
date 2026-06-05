@@ -184,17 +184,16 @@ def _verificar_nfse_duplicada(
 ) -> dict | None:
     """
     Verifica se já existe NFS-e emitida para esta fatura.
-    Checa múltiplas fontes:
-      1. Log local por invoice_id (nfse_emitidas/*.json)
-      2. Arquivo DPS por invoice_id (nfse_emitidas/dps_*)
-      3. Empresa com nf_na_criacao=True
-      4. Custom variable 'nfse_emitida_na_criacao' na fatura da Iugu
-      5. Mesmo CNPJ + mesmo mês + mesmo valor nos logs locais (anti-duplicata geral)
+    Guardrail BASEADO EM EVIDÊNCIA: só um log de emissão REAL bem-sucedido
+    (nfse_<invoice_id>.json com sucesso=True) prova que a nota existe.
+    Checa duas fontes:
+      1. Log local por invoice_id, com sucesso=True (nfse_emitidas/*.json)
+      2. Mesmo CNPJ + mesmo mês + mesmo valor nos logs reais (sucesso=True)
+         — anti-duplicata geral, usando os campos reais do log.
 
-    ADR-0003 Etapa 1: a regra 3 usa a `empresa` JÁ RESOLVIDA (por customer_id)
-    passada pelo chamador, em vez de re-resolver por CNPJ. Re-resolver por CNPJ
-    reintroduziria a ambiguidade multi-cliente (poderia checar nf_na_criacao do
-    departamento errado). `empresa` opcional para compatibilidade.
+    `empresa` é mantido na assinatura apenas por compatibilidade com os
+    chamadores; não é mais usado (a regra antiga de nf_na_criacao foi removida
+    porque pulava emissão por flag, não por evidência).
 
     Retorna dict com detalhes se duplicata encontrada, None se ok.
     """
@@ -203,12 +202,12 @@ def _verificar_nfse_duplicada(
 
     nfse_dir = Path(settings.nfse_output_dir)
 
-    # 1. Log local por invoice_id
+    # 1. Log local por invoice_id (só emissão REAL bem-sucedida prova a nota)
     if nfse_dir.exists():
         for log_file in nfse_dir.glob("*.json"):
             try:
                 data = _json.loads(log_file.read_text(encoding="utf-8"))
-                if data.get("invoice_id") == invoice_id:
+                if data.get("invoice_id") == invoice_id and data.get("sucesso") is True:
                     return {
                         "fonte": "log_local",
                         "detalhe": f"Arquivo: {log_file.name}",
@@ -217,55 +216,29 @@ def _verificar_nfse_duplicada(
             except Exception:
                 continue
 
-        # 2. Arquivo DPS
-        for dps_file in nfse_dir.glob("dps_*"):
-            if invoice_id[:8] in dps_file.name:
-                return {
-                    "fonte": "arquivo_dps",
-                    "detalhe": f"Arquivo: {dps_file.name}",
-                    "arquivo": dps_file.name,
-                }
-
-    # 3. Empresa com nf_na_criacao=True → NFS-e emitida junto com o boleto.
-    # Usa a empresa já resolvida (por customer_id) — não re-resolve por CNPJ.
-    try:
-        if empresa and empresa.nf_na_criacao and empresa.emitir_nf:
-            return {
-                "fonte": "nf_na_criacao",
-                "detalhe": f"{empresa.razao_social} emite NF-e na criação da fatura",
-            }
-    except Exception:
-        pass
-
-    # 4. Custom variable na fatura da Iugu
-    for var in (invoice.get("custom_variables") or []):
-        if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao":
-            if var.get("value") == "true":
-                return {
-                    "fonte": "custom_variable_iugu",
-                    "detalhe": "Fatura marcada com nfse_emitida_na_criacao=true na Iugu",
-                }
-
-    # 5. Anti-duplicata geral: mesmo CNPJ + mesmo mês + mesmo valor
+    # 2. Anti-duplicata geral: mesmo CNPJ + mesmo mês + mesmo valor (campos reais)
     if nfse_dir.exists():
-        valor_fatura = invoice.get("total_cents") or invoice.get("total_paid_cents")
-        paid_at = invoice.get("paid_at") or ""
-        mes_ref = paid_at[:7] if len(paid_at) >= 7 else ""  # "2026-04"
+        valor_reais = round(
+            (int(invoice.get("total_paid_cents") or invoice.get("total_cents") or 0)) / 100.0,
+            2,
+        )
+        mes_ref = (invoice.get("paid_at") or "")[:7]  # "2026-04"
 
-        if valor_fatura and mes_ref:
+        if valor_reais > 0 and len(mes_ref) == 7:
             for log_file in nfse_dir.glob("*.json"):
                 try:
                     data = _json.loads(log_file.read_text(encoding="utf-8"))
                     if (
-                        data.get("cnpj") == cnpj
-                        and data.get("valor_cents") == valor_fatura
-                        and (data.get("competencia", "") or "").startswith(mes_ref)
+                        data.get("sucesso") is True
+                        and data.get("cnpj") == cnpj
+                        and data.get("valor") == valor_reais
+                        and (data.get("data_emissao") or "")[:7] == mes_ref
                     ):
                         return {
                             "fonte": "duplicata_mes_valor",
                             "detalhe": (
                                 f"NFS-e já existe para CNPJ {cnpj} "
-                                f"no mês {mes_ref} com valor {valor_fatura} cents"
+                                f"no mês {mes_ref} com valor R$ {valor_reais:.2f}"
                             ),
                             "arquivo": log_file.name,
                         }
@@ -377,31 +350,6 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
             "empresa": empresa.razao_social,
             "acao": "ignorado",
             "motivo": "emitir_nf=False",
-        }
-
-    # 3.2. Verifica se a NFS-e já foi emitida na criação da fatura (nf_na_criacao)
-    nfse_ja_emitida = False
-    if empresa.nf_na_criacao:
-        nfse_ja_emitida = True
-    custom_vars = invoice.get("custom_variables") or []
-    for var in custom_vars:
-        if isinstance(var, dict) and var.get("name") == "nfse_emitida_na_criacao":
-            if var.get("value") == "true":
-                nfse_ja_emitida = True
-                break
-
-    if nfse_ja_emitida:
-        logger.info(
-            f"📄 CNPJ {cnpj} ({empresa.razao_social}) — NFS-e já foi emitida na criação "
-            f"da fatura (nf_na_criacao=True). Pulando emissão no pagamento."
-        )
-        return {
-            "success": True,
-            "invoice_id": invoice_id,
-            "cnpj": cnpj,
-            "empresa": empresa.razao_social,
-            "acao": "nfse_pulada",
-            "motivo": "NFS-e já emitida na criação da fatura (nf_na_criacao=True)",
         }
 
     # 4. GUARDRAIL: verifica se já existe NFS-e para este cliente/mês/valor
