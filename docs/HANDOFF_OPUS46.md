@@ -15,14 +15,16 @@ Automação que, ao receber webhook de fatura paga da Iugu, emite NFS-e automát
 | Fase | Status | Observação |
 |------|--------|------------|
 | **Fase 1 — Webhook + cobrança + cadastro Iugu** | ✅ **Validada em produção** | Fluxo "fatura → pago → webhook → atualização" rodando no ar |
-| **Fase 2 — Emissão NFS-e DF** | 🟡 **Estruturalmente pronta — aguardando validação do XML pelo Nota Control** | Habilitação em produção concluída. Próximo passo é mandar 1 RPS de exemplo para `integracao.df@notacontrol.com.br`. NFS-e real ainda não emitida |
+| **Fase 2 — Emissão NFS-e DF** | ✅ **PROVADA EM PRODUÇÃO** | 1ª NFS-e real emitida via integração ABRASF 2.04 em 05/06/2026: **nº 408, código B3B17DA6A** (SINDICONDOMINIO-DF, R$3.150). Fluxo RPS→assinatura→SOAP→ISSnet→NFS-e oficial end-to-end. Emissão ainda **manual** (script); auto-emissão via webhook a ligar |
 | **Fase 3 — Deploy VPS** | ✅ **Concluída** | Backend, painel web, HTTPS, cron e hardening rodando |
 | **Hardening de segurança (OWASP/pentest)** | ✅ Aplicado | CORS restrito, JWT, rate-limit, HSTS, compare_digest, /docs off etc. Detalhes em `docs/pentest_2026-06.md` e `docs/ressalvas_pentest_2026-06.md` |
 | **Arquitetura interna (roadmap)** | 🟡 **Onda 0 + ADR-0003 Etapa 1 deployados** | ADR-0001 (SQLite), ADR-0002 (idempotência), ADR-0003 Etapa 2 e ADR-0004 propostos em `docs/adr/` |
 
-## 3. Última conquista — Fase 2 destravada (não significa "emitiu nota")
+## 3. Última conquista — 1ª NFS-e REAL emitida (#408) via integração
 
-A MEGASUPORTE foi **habilitada em produção** pelo Nota Control (chamado resolvido 05/06/2026). Junto vieram dois esclarecimentos que mudaram o rumo técnico:
+✅ **Em 05/06/2026 a integração emitiu a primeira NFS-e real em produção:** nº **408**, código **B3B17DA6A**, para SINDICONDOMINIO-DF (R$ 3.150,00, ISS R$ 63,00), via ABRASF 2.04 / `GerarNfse`. Fluxo completo RPS→assinatura A1→SOAP→ISSnet DF→NFS-e oficial validado end-to-end. Consultável em `https://iss.fazenda.df.gov.br/online/` (nº 408 + código B3B17DA6A).
+
+Como chegamos aqui: a MEGASUPORTE foi **habilitada em produção** pelo Nota Control (chamado resolvido 05/06/2026). Dois esclarecimentos mudaram o rumo técnico:
 
 1. **Produção do DF hoje é ABRASF 2.04, não Padrão Nacional.** Endpoint oficial: `https://df.issnetonline.com.br/webservicenfse204/nfse.asmx`. Documento = RPS série 3.
 2. **O Padrão Nacional (DPS v1.01) que já tínhamos pronto** só vira obrigatório em **30/06/2026** (prazo prorrogado). Por isso vai bem em XSD mas dava 404 no endpoint `wsnfsenacional` — não estava liberado lá.
@@ -41,23 +43,21 @@ Para cobrir os dois mundos, foi criado o **ADR-0005**: arquitetura dual (dispatc
 - **Código de tributação municipal:** `1071` + alíquota **2%** — **confirmado pela contabilidade em 05/06/2026** (a ficha lista 1071=5% genérico, mas o contador autorizou 1071+2% para este prestador).
 - `cTribNac=010701`, `cTribMun=1071`, `cNBS=115013000`, IBSCBS CST `900`/cClassTrib `900001`, tributos SN `7,48%`.
 
-### Pendências do primeiro envio real (não-bloqueios estruturais)
+### Validado no 1º envio real (confirmado pelo ISSnet)
 
-Estão centralizadas como constantes no topo da seção ABRASF de `src/nfse_df.py` — qualquer ajuste depois do retorno do Nota Control é "1 linha":
+- Namespace, SOAPAction, XML aninhado (não CDATA), `versaoDados=2.04` — **aceitos**.
+- **CNAE** `6209100` (`NFSE_CNAE`) e **MunicipioIncidencia** `5300108` (`NFSE_MUNICIPIO_INCIDENCIA`) — adicionados após os erros E311/L001; **aceitos**.
+- Item `01.07` + código municipal `1071` + alíquota `2%` — confirmados (batem com a NFS-e #402 do portal).
+- **RPS série 3:** faixa autorizada **1–50** (liberada 13/01/2023). 1ª nota usou RPS **1**; `.contador_rps.json` em 1 (próximo = 2). ⚠️ **Solicitar mais RPS no portal antes de esgotar os 50.**
 
-1. Namespace de serviço exato do ISSnet (`ABRASF_SERVICE_NS`)
-2. SOAPAction (com/sem aspas)
-3. `nfseCabecMsg`/`nfseDadosMsg` aninhado vs CDATA (ramo CDATA pronto, comentado)
-4. `versaoDados=2.04` aceito
-5. **Faixa inicial do RPS série 3** — solicitar no portal ISSnet (menu "Solicitação de Documentos Fiscais") e ajustar o `.contador_rps.json` antes do primeiro envio
-6. Consistência `01.07` ↔ `1071` no envio real
+## 4. Próximos passos (após a 1ª emissão real)
 
-## 4. Próximo passo concreto
-
-1. Rodar `scripts/validar_rps_xsd.py --com-assinatura` localmente para gerar o RPS assinado de exemplo.
-2. Enviar o XML para **`integracao.df@notacontrol.com.br`** pedindo validação + esclarecer pendências 1-4 acima. Rascunho de e-mail pronto em `docs/email_notacontrol_padrao_nacional.md`.
-3. Solicitar a **faixa de RPS série 3** no portal ISSnet.
-4. Quando validarem: ajustar `.env` (`NFSE_PADRAO=abrasf204`, `NFSE_AMBIENTE=homologacao`) → homologar ISSnet → 1 RPS produção R$1,00 (com `--dry-run` antes).
+1. **`ConsultarUrlNfse`** — implementar a operação (extensão ISSnet no WSDL do DF) para obter o **PDF/URL oficial** da NFS-e e entregar ao tomador. Decisão de produto: **não geramos mais PDF próprio** (reportlab removido); usamos o oficial do ISSnet.
+2. **Commit/deploy na VPS** do backend ABRASF + fixes (ainda **não commitado/deployado** — as emissões até agora foram manuais na máquina do Bruno).
+3. **Ligar auto-emissão no webhook:** `NFSE_PADRAO=abrasf204` + `NFSE_AMBIENTE=producao` + `NFSE_DRY_RUN=false` no `.env` da VPS → fatura paga de empresa com `emitir_nf=True` emite NFS-e sozinha. ⚠️ Ligar com consciência (cada pagamento vira documento fiscal real).
+4. **Solicitar mais RPS série 3** no portal antes de esgotar a faixa 1–50.
+5. (Robustez) ler `.contador_rps.json` com `utf-8-sig` (evita o tropeço do BOM que tivemos); limpar mojibake do `retorno.xml` arquivado.
+6. Runbook da emissão manual: `docs/runbook_primeira_emissao_abrasf.md`.
 
 ## 5. Documentos a ler antes de mexer em código (ordem)
 

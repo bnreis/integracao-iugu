@@ -149,6 +149,8 @@ def _validar_patterns(envio: etree._Element) -> list[str]:
         (f".//{p}ItemListaServico", r"^\d{2}\.\d{2}$", "tsItemListaServico: 'NN.NN' (LC 116/2003)"),
         (f".//{p}ValorServicos", r"^\d{1,13}\.\d{2}$", "tsValor: decimal com 2 casas"),
         (f".//{p}CodigoMunicipio", r"^\d{1,7}$", "tsCodigoMunicipioIbge: int até 7 dígitos"),
+        (f".//{p}CodigoCnae", r"^\d{1,7}$", "tsCodigoCnae: int até 7 dígitos"),
+        (f".//{p}MunicipioIncidencia", r"^\d{1,7}$", "tsCodigoMunicipioIbge: int até 7 dígitos"),
         (f".//{p}Cep", r"^\d{8}$", "tsCep: 8 dígitos"),
         (f".//{p}Serie", r"^.{1,5}$", "tsSerieRps: 1-5 chars"),
     ]

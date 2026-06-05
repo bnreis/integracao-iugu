@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     )
     # Série do RPS no DF (ABRASF 2.04) — fixa em "3" conforme habilitação do Nota Control.
     nfse_serie_rps: str = Field("3", description="Série do RPS no DF (ABRASF 2.04)")
+    # Código CNAE do serviço (ABRASF 2.04) — obrigatório no ISSnet DF (erro L001 sem ele).
+    # tsCodigoCnae = xsd:int totalDigits=7. 6209100 = Suporte técnico em TI.
+    nfse_cnae: str = Field(
+        "6209100", description="Código CNAE do serviço (6209100 = Suporte técnico em TI)"
+    )
+    # Município de incidência do ISSQN (ABRASF 2.04) — obrigatório quando ExigibilidadeISS=1
+    # (erro E311 sem ele). tsCodigoMunicipioIbge = xsd:int totalDigits=7. Brasília = 5300108.
+    nfse_municipio_incidencia: str = Field(
+        "5300108", description="Código IBGE do município de incidência do ISSQN (Brasília=5300108)"
+    )
 
     nfse_inscricao_municipal: str = Field("", description="Inscrição municipal DF")
     nfse_cnpj_prestador: str = Field("", description="CNPJ do prestador (só números)")

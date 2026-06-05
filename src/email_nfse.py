@@ -70,7 +70,8 @@ def enviar_nfse_email(
             - numero_nfse: número da NFS-e
             - xml_enviado_path: caminho do XML da DPS enviada
             - xml_retorno_path: caminho do XML de retorno do webservice
-            - pdf_path: caminho do PDF (se disponível)
+            - pdf_path: caminho do PDF (hoje sempre None — não geramos mais PDF
+              próprio; o DANFSE oficial virá do ISSnet via ConsultarUrlNfse)
             - codigo_verificacao: código de verificação da NFS-e
         destinatario_extra: e-mail adicional para enviar cópia (CC)
 
@@ -148,7 +149,9 @@ respondendo a este e-mail.
 """
     msg.attach(MIMEText(corpo_html, "html", "utf-8"))
 
-    # Anexa os XMLs e PDF disponíveis
+    # Anexa os XMLs disponíveis. O XML é o entregável principal: não geramos mais
+    # PDF próprio, então o envio NÃO depende de PDF — o corpo do e-mail já traz
+    # número + código de verificação. Se houver pdf_path (futuro), também anexa.
     anexos_ok = 0
     xml_enviado = nfse_result.get("xml_enviado_path")
     if xml_enviado:
@@ -162,6 +165,9 @@ respondendo a este e-mail.
         if _anexar_arquivo(msg, Path(xml_retorno), nome_ret):
             anexos_ok += 1
 
+    # TODO ConsultarUrlNfse: hoje pdf_path é sempre None (PDF próprio removido).
+    # Quando a consulta da nota no ISSnet (ConsultarUrlNfse) for implementada, ela
+    # deverá preencher pdf_path (ou uma URL no corpo) e este bloco anexa o PDF oficial.
     pdf_path = nfse_result.get("pdf_path")
     if pdf_path:
         nome_pdf = f"NFS-e_{numero_nfse}.pdf"
@@ -173,7 +179,7 @@ respondendo a este e-mail.
             f"Nenhum arquivo de NFS-e encontrado para anexar ao e-mail "
             f"(NFS-e Nº {numero_nfse}, empresa {empresa.razao_social})"
         )
-        # Envia mesmo assim — o corpo do e-mail já tem as informações
+        # Envia mesmo assim — o corpo do e-mail já tem número + código de verificação
 
     # Envia
     destinatarios = [email_destino]

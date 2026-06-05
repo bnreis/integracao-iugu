@@ -118,6 +118,11 @@ class ResultadoEmissao:
     codigo_verificacao: Optional[str] = None
     xml_enviado_path: Optional[Path] = None
     xml_retorno_path: Optional[Path] = None
+    # PDF do DANFSE: NÃO geramos mais PDF próprio (reportlab removido). A chave
+    # permanece no dict de retorno para não quebrar consumidores (api_routes,
+    # email_nfse), mas hoje fica sempre None.
+    # TODO ConsultarUrlNfse: preencher com a URL/PDF oficial do ISSnet quando a
+    # consulta da nota emitida (ConsultarUrlNfse) for implementada.
     pdf_path: Optional[Path] = None
     mensagem_erro: Optional[str] = None
     mensagens: list[str] = field(default_factory=list)
@@ -316,9 +321,8 @@ async def _emitir_abrasf204(invoice: dict[str, Any], empresa: Empresa) -> dict[s
         resultado.numero_nfse = f"DRY-RUN-RPS-{numero_rps}"
         resultado.ambiente = f"{settings.nfse_ambiente} (dry-run)"
         resultado.mensagens = ["DRY-RUN ABRASF 2.04: RPS montado+assinado, não enviado"]
-        # Gera também o DANFSE de RASCUNHO (validação local do gerador de PDF).
-        # Sem número/código oficiais — usa placeholders. Falha não derruba o dry-run.
-        _gerar_pdf_dryrun_abrasf(resultado, empresa, servico, endereco_tomador, numero_rps)
+        # Dry-run gera SÓ o XML (que é o que valida contra o XSD). Não há mais
+        # geração de PDF próprio — o DANFSE oficial virá do ISSnet no futuro.
         return resultado.to_dict()
 
     # 5. Enviar ao webservice ABRASF (mTLS), endpoint conforme ambiente
@@ -378,13 +382,18 @@ async def _emitir_abrasf204(invoice: dict[str, Any], empresa: Empresa) -> dict[s
         resultado.mensagem_erro = f"Erro ao parsear retorno: {exc}"
         return resultado.to_dict()
 
-    # 8. Em sucesso, gera o PDF (e-mail é disparado por processar_pagamento — não duplicar)
+    # 8. Em sucesso, apenas loga. Não geramos mais PDF próprio (reportlab removido):
+    # o DANFSE oficial será obtido do ISSnet via ConsultarUrlNfse (trabalho futuro).
+    # O e-mail é disparado por processar_pagamento e segue só com o XML por enquanto.
     if resultado.sucesso:
         logger.info(
             f"[NFS-e ABRASF 2.04] Emissão OK: número {resultado.numero_nfse} "
             f"código {resultado.codigo_verificacao}"
         )
-        _gerar_pdf_resultado(resultado, empresa, servico, endereco_tomador)
+        # Grava o índice nfse_<invoice_id>.json que a API usa para detectar a nota
+        # (listagem/detalhe/dashboard). Resiliente: não derruba a emissão se falhar.
+        _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_rps)
+        # TODO ConsultarUrlNfse: preencher resultado.pdf_path com a URL/PDF oficial.
 
     return resultado.to_dict()
 
@@ -532,6 +541,9 @@ def _montar_xml_rps_abrasf(
     _el(serv, "IssRetido", "2")
     # ItemListaServico (tsItemListaServico): subitem LC 116/2003 no formato "NN.NN".
     _el(serv, "ItemListaServico", _formatar_item_lista_servico(servico.codigo_servico))
+    # CodigoCnae (tsCodigoCnae = xsd:int, totalDigits=7): obrigatório no ISSnet DF
+    # (erro L001 sem ele). Vem ANTES de CodigoTributacaoMunicipio na ordem do XSD.
+    _el(serv, "CodigoCnae", _so_digitos(settings.nfse_cnae))
     # CodigoTributacaoMunicipio (tsCodigoTributacao, string até 20) — ex.: "1071".
     _el(serv, "CodigoTributacaoMunicipio", str(settings.nfse_codigo_trib_municipal))
     # Discriminacao (obrigatório, máx 2000).
@@ -540,6 +552,10 @@ def _montar_xml_rps_abrasf(
     _el(serv, "CodigoMunicipio", cod_mun_prestador)
     # ExigibilidadeISS (tsExigibilidadeISS): 1 = Exigível.
     _el(serv, "ExigibilidadeISS", "1")
+    # MunicipioIncidencia (tsCodigoMunicipioIbge = xsd:int, totalDigits=7): obrigatório
+    # quando ExigibilidadeISS=1 (erro E311 sem ele). Vem DEPOIS de ExigibilidadeISS na
+    # ordem do XSD — Brasília 5300108 (mesmo município da prestação).
+    _el(serv, "MunicipioIncidencia", _so_digitos(settings.nfse_municipio_incidencia))
 
     # ---------- Prestador (tcIdentificacaoPessoaEmpresa) ----------
     prest = _el(inf_decl, "Prestador")
@@ -884,131 +900,6 @@ def _parsear_resposta_abrasf(xml_resposta: str) -> dict[str, Any]:
     }
 
 
-# -----------------------------------------------------------------------------
-# Geração de PDF (reutiliza pdf_nfse — extraído para reuso entre backends)
-# -----------------------------------------------------------------------------
-def _gerar_pdf_resultado(
-    resultado: ResultadoEmissao,
-    empresa: Empresa,
-    servico: DadosServico,
-    endereco_tomador: dict[str, str],
-) -> None:
-    """Gera o DANFSE em PDF a partir de um ResultadoEmissao aprovado.
-
-    Falha não interrompe o fluxo (PDF é complementar). Reutiliza pdf_nfse.gerar_pdf_nfse,
-    o mesmo gerador do backend nacional, mantendo o layout consistente entre protocolos.
-    """
-    try:
-        from .pdf_nfse import gerar_pdf_nfse
-
-        pdf_path = Path(settings.nfse_output_dir) / f"NFS-e_{resultado.numero_nfse}.pdf"
-        valor_formatado = f"R$ {servico.valor_cents / 100:.2f}".replace('.', ',')
-        endereco_str = (
-            f"{endereco_tomador.get('logradouro', '')} "
-            f"{endereco_tomador.get('numero', '')} "
-            f"{endereco_tomador.get('bairro', '')}, "
-            f"{endereco_tomador.get('cidade', '')} - "
-            f"{endereco_tomador.get('uf', '')}"
-        )
-        url_validacao = (
-            f"https://iss.fazenda.df.gov.br/online/consultarNFSe.aspx?"
-            f"id={resultado.numero_nfse}&cod={resultado.codigo_verificacao}"
-        )
-        sucesso_pdf = gerar_pdf_nfse(
-            pdf_path=pdf_path,
-            numero_nfse=resultado.numero_nfse,
-            serie=settings.nfse_serie_rps,
-            data_emissao=datetime.now().strftime('%d/%m/%Y'),
-            codigo_verificacao=resultado.codigo_verificacao,
-            tomador_nome=empresa.razao_social,
-            tomador_cnpj=empresa.cnpj,
-            tomador_endereco=endereco_str,
-            descricao_servico=servico.descricao[:100],
-            valor_servico=valor_formatado,
-            aliquota_iss=servico.aliquota_iss,
-            prestador_nome=settings.nfse_razao_social_prestador,
-            prestador_cnpj=settings.nfse_cnpj_prestador,
-            url_validacao=url_validacao,
-        )
-        if sucesso_pdf:
-            resultado.pdf_path = pdf_path
-            logger.info(f"[NFS-e PDF] Gerado com sucesso: {pdf_path}")
-        else:
-            logger.warning("[NFS-e PDF] Falha ao gerar PDF (continuando sem PDF)")
-    except ImportError:
-        logger.warning("Módulo pdf_nfse não disponível — PDF não será gerado")
-    except Exception as exc:
-        logger.warning(f"Falha ao gerar PDF da NFS-e: {exc} (continuando sem PDF)")
-
-
-def _gerar_pdf_dryrun_abrasf(
-    resultado: ResultadoEmissao,
-    empresa: Empresa,
-    servico: DadosServico,
-    endereco_tomador: dict[str, str],
-    numero_rps: str,
-) -> None:
-    """Gera um DANFSE de RASCUNHO no dry-run ABRASF 2.04 (validação local, sem rede).
-
-    Diferente de `_gerar_pdf_resultado` (que usa o número/código oficiais vindos da
-    Receita), aqui ainda NÃO houve envio: usamos placeholders explícitos no lugar do
-    número da NFS-e e do código de verificação, para que o PDF deixe inequívoco que é
-    um rascunho sem valor fiscal. O objetivo é só validar localmente que o gerador de
-    PDF roda com os dados do RPS já montados — o XML continua sendo o entregável principal.
-
-    Reutiliza `pdf_nfse.gerar_pdf_nfse` (o mesmo gerador do fluxo real, sem criar nada
-    novo). Falha aqui é tolerada: loga warning e segue, pois o dry-run não pode ser
-    derrubado por um problema no PDF complementar.
-    """
-    try:
-        from .pdf_nfse import gerar_pdf_nfse
-
-        # Nome do arquivo com sufixo "_dryrun" — deixa claro no disco que é rascunho,
-        # mesmo que alguém abra só a pasta nfse_emitidas/ sem ler o conteúdo.
-        pdf_path = (
-            Path(settings.nfse_output_dir) / f"NFS-e_DRY-RUN-RPS-{numero_rps}_dryrun.pdf"
-        )
-        valor_formatado = f"R$ {servico.valor_cents / 100:.2f}".replace('.', ',')
-        endereco_str = (
-            f"{endereco_tomador.get('logradouro', '')} "
-            f"{endereco_tomador.get('numero', '')} "
-            f"{endereco_tomador.get('bairro', '')}, "
-            f"{endereco_tomador.get('cidade', '')} - "
-            f"{endereco_tomador.get('uf', '')}"
-        )
-        sucesso_pdf = gerar_pdf_nfse(
-            pdf_path=pdf_path,
-            # Placeholders no lugar do número/código oficiais (que só viriam da Receita).
-            numero_nfse=f"RASCUNHO (DRY-RUN RPS {numero_rps})",
-            serie=settings.nfse_serie_rps,
-            data_emissao=datetime.now().strftime('%d/%m/%Y'),
-            codigo_verificacao="SEM VALOR FISCAL",
-            tomador_nome=empresa.razao_social,
-            tomador_cnpj=empresa.cnpj,
-            tomador_endereco=endereco_str,
-            descricao_servico=servico.descricao[:100],
-            valor_servico=valor_formatado,
-            aliquota_iss=servico.aliquota_iss,
-            prestador_nome=settings.nfse_razao_social_prestador,
-            prestador_cnpj=settings.nfse_cnpj_prestador,
-            # Sem URL de validação: não existe NFS-e publicada para consultar no portal.
-            url_validacao=None,
-        )
-        if sucesso_pdf:
-            resultado.pdf_path = pdf_path
-            logger.info(f"[NFS-e PDF DRY-RUN] Rascunho gerado com sucesso: {pdf_path}")
-        else:
-            logger.warning(
-                "[NFS-e PDF DRY-RUN] Falha ao gerar PDF de rascunho (continuando sem PDF)"
-            )
-    except ImportError:
-        logger.warning("Módulo pdf_nfse não disponível — PDF de rascunho não será gerado")
-    except Exception as exc:
-        logger.warning(
-            f"Falha ao gerar PDF de rascunho (dry-run): {exc} (continuando sem PDF)"
-        )
-
-
 # =============================================================================
 # BACKEND NACIONAL — Padrão Nacional CGNFS-e (DPS v1.01)
 # =============================================================================
@@ -1189,56 +1080,14 @@ async def _emitir_nacional(invoice: dict[str, Any], empresa: Empresa) -> dict[st
             f"[NFS-e] Emissão OK: número {resultado.numero_nfse} "
             f"código {resultado.codigo_verificacao}"
         )
-
-        # 9. Gerar PDF customizado (opcional — falha não interrompe o fluxo)
-        try:
-            from .pdf_nfse import gerar_pdf_nfse
-
-            pdf_path = Path(settings.nfse_output_dir) / f"NFS-e_{resultado.numero_nfse}.pdf"
-
-            # Preparar dados para o PDF
-            valor_formatado = f"R$ {servico.valor_cents / 100:.2f}".replace('.', ',')
-            endereco_tomador_str = (
-                f"{endereco_tomador.get('logradouro', '')} "
-                f"{endereco_tomador.get('numero', '')} "
-                f"{endereco_tomador.get('bairro', '')}, "
-                f"{endereco_tomador.get('cidade', '')} - "
-                f"{endereco_tomador.get('uf', '')}"
-            )
-
-            # URL para validação (construída a partir do número da NFS-e)
-            url_validacao = (
-                f"https://iss.fazenda.df.gov.br/online/consultarNFSe.aspx?"
-                f"id={resultado.numero_nfse}&cod={resultado.codigo_verificacao}"
-            )
-
-            sucesso_pdf = gerar_pdf_nfse(
-                pdf_path=pdf_path,
-                numero_nfse=resultado.numero_nfse,
-                serie=settings.nfse_serie_padrao,
-                data_emissao=datetime.now().strftime('%d/%m/%Y'),
-                codigo_verificacao=resultado.codigo_verificacao,
-                tomador_nome=empresa.razao_social,
-                tomador_cnpj=empresa.cnpj,
-                tomador_endereco=endereco_tomador_str,
-                descricao_servico=servico.descricao[:100],  # Limitar a 100 chars
-                valor_servico=valor_formatado,
-                aliquota_iss=servico.aliquota_iss,
-                prestador_nome=settings.nfse_razao_social_prestador,
-                prestador_cnpj=settings.nfse_cnpj_prestador,
-                url_validacao=url_validacao,
-            )
-
-            if sucesso_pdf:
-                resultado.pdf_path = pdf_path
-                logger.info(f"[NFS-e PDF] Gerado com sucesso: {pdf_path}")
-            else:
-                logger.warning(f"[NFS-e PDF] Falha ao gerar PDF (continuando sem PDF)")
-
-        except ImportError:
-            logger.warning("Módulo pdf_nfse não disponível — PDF não será gerado")
-        except Exception as exc:
-            logger.warning(f"Falha ao gerar PDF da NFS-e: {exc} (continuando sem PDF)")
+        # Grava o índice nfse_<invoice_id>.json que a API usa para detectar a nota
+        # (listagem/detalhe/dashboard). Resiliente: não derruba a emissão se falhar.
+        # No backend nacional o documento de origem é a DPS — passamos numero_dps.
+        _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_dps)
+        # Não geramos mais PDF próprio (reportlab removido). O DANFSE oficial será
+        # obtido do ISSnet via ConsultarUrlNfse no futuro; até lá, resultado.pdf_path
+        # permanece None e o e-mail segue só com o XML.
+        # TODO ConsultarUrlNfse: preencher resultado.pdf_path com a URL/PDF oficial.
 
     return resultado.to_dict()
 
@@ -2257,6 +2106,87 @@ def _arquivar(xml_str: str, prefix: str, suffix: str) -> Path:
     caminho = Path(settings.nfse_output_dir) / fname
     caminho.write_text(xml_str, encoding="utf-8")
     return caminho
+
+
+def _gravar_log_nfse(
+    invoice: dict[str, Any],
+    empresa: Empresa,
+    resultado: ResultadoEmissao,
+    rps_numero: Optional[int | str] = None,
+) -> Optional[Path]:
+    """Grava o log `nfse_<invoice_id>.json` que a API lê para detectar a nota emitida.
+
+    Por que existe: os backends de emissão só arquivavam os XMLs (rps_*/dps_*). As
+    funções de detecção em `api_routes.py` (`_carregar_mapa_nfse`,
+    `_buscar_nfse_da_fatura`, `_check_nfse`, `listar_nfse`) casam a NFS-e à fatura
+    lendo arquivos `*.json` e comparando o campo `invoice_id` — sem este arquivo a
+    listagem/detalhe/dashboard nunca reconheciam a nota. Esta função fecha o gap.
+
+    Chamada SOMENTE em sucesso real (não em dry-run nem falha), por ambos os backends
+    (`_emitir_abrasf204` e `_emitir_nacional`), logo após `resultado.sucesso == True`.
+
+    Resiliente por design: se a gravação falhar, apenas loga `warning` e devolve None.
+    O XML já foi arquivado e a NFS-e já foi aceita pelo ISS — o log é só o índice da
+    API, então uma falha aqui jamais pode derrubar a emissão.
+
+    As chaves gravadas espelham exatamente o que os leitores consomem:
+        - invoice_id ......... chave de casamento fatura<->nota (todos os leitores)
+        - numero_nfse ........ listar_faturas/detalhe/listar_nfse
+        - codigo_verificacao . detalhe + e-mail (enviar_nfse_email)
+        - cnpj / razao_social  listar_nfse (cnpj_tomador, razao_social)
+        - valor .............. listar_nfse (R$ em reais, 2 casas)
+        - data_emissao ....... detalhe/listar_nfse (ISO YYYY-MM-DD)
+        - sucesso ............ filtro de sucesso em todos
+        - xml_enviado_path /   enviar_nfse_email anexa os XMLs no reenvio
+          xml_retorno_path /   (pdf_path hoje é sempre None — DANFSE oficial futuro)
+          pdf_path
+        - rps_numero / padrao / ambiente .... extras úteis para auditoria
+    """
+    invoice_id = invoice.get("id") or ""
+    if not invoice_id:
+        logger.warning("[NFS-e log] invoice sem 'id' — log .json não será gravado")
+        return None
+
+    # Valor em reais (os leitores exibem 'valor' como R$ com 2 casas).
+    total_cents = int(invoice.get("total_paid_cents") or invoice.get("total_cents") or 0)
+    valor_reais = round(total_cents / 100.0, 2)
+
+    log = {
+        "invoice_id": invoice_id,
+        "numero_nfse": resultado.numero_nfse,
+        "codigo_verificacao": resultado.codigo_verificacao,
+        "cnpj": empresa.cnpj,
+        "razao_social": empresa.razao_social,
+        "valor": valor_reais,
+        "data_emissao": date.today().isoformat(),
+        "sucesso": True,
+        # Caminhos dos artefatos (string), reusados pelo reenvio de e-mail.
+        "xml_enviado_path": str(resultado.xml_enviado_path) if resultado.xml_enviado_path else None,
+        "xml_retorno_path": str(resultado.xml_retorno_path) if resultado.xml_retorno_path else None,
+        "pdf_path": str(resultado.pdf_path) if resultado.pdf_path else None,
+        # Extras de auditoria.
+        "rps_numero": str(rps_numero) if rps_numero is not None else None,
+        "padrao": settings.nfse_padrao,
+        "ambiente": resultado.ambiente or settings.nfse_ambiente,
+    }
+
+    try:
+        Path(settings.nfse_output_dir).mkdir(parents=True, exist_ok=True)
+        caminho = Path(settings.nfse_output_dir) / f"nfse_{invoice_id}.json"
+        # UTF-8 sem BOM; ensure_ascii=False para preservar acentos da razão social.
+        caminho.write_text(
+            json.dumps(log, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(f"[NFS-e log] Índice gravado: {caminho.name} (invoice {invoice_id})")
+        return caminho
+    except Exception as exc:
+        # Nunca derruba a emissão: o XML já foi arquivado e a nota já foi aceita.
+        logger.warning(
+            f"[NFS-e log] Falha ao gravar índice nfse_{invoice_id}.json: {exc} "
+            f"(emissão NÃO afetada — XML já arquivado)"
+        )
+        return None
 
 
 # =============================================================================

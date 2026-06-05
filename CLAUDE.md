@@ -13,9 +13,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Cliente:** MEGASUPORTE SERVIÇOS DE TI LTDA (Brasília/DF, Simples Nacional ME/EPP).
 
 **Fases:**
-- **Fase 1** — webhook Iugu → planilha → decisão de emissão. Estável.
-- **Fase 2** — emissão NFS-e DF via webservice Nota Control. XML v1.01 validado contra XSD; status de produção/homologação muda — confira HANDOFF + auto-memória.
-- **Fase 3** — Deploy na VPS Hostinger (`iugu.megasuporte.com`, IP `72.62.11.230`). **Em andamento** via runbook vivo `docs/deploy_vps.md`. ⚠️ VPS compartilhada com produção (Asterisk/PBX + Apache+PHP + MariaDB): não mexer no firewall, no fuso, nem rodar `apt upgrade`; Apache existente serve de proxy reverso (não instalar nginx).
+- **Fase 1** — webhook Iugu → empresa autorizada → decisão de emissão. ✅ Estável (validada em produção 05/06/2026).
+- **Fase 2** — emissão NFS-e DF via webservice Nota Control. **Arquitetura dual** (ADR-0005): backend nacional DPS v1.01 (`_emitir_nacional`) E backend ABRASF 2.04 RPS (`_emitir_abrasf204`) coexistem em `src/nfse_df.py`, despachados por `NFSE_PADRAO` no `.env`. Os dois validam contra seus XSDs. **Habilitação em produção concluída** (chamado Nota Control 05/06/2026) — produção atual = ABRASF 2.04 (RPS série 3, `df.issnetonline.com.br/webservicenfse204`); a virada para o Padrão Nacional vira "trocar 1 variável" em 30/06/2026. ✅ **1ª NFS-e real emitida em produção (nº 408, código B3B17DA6A) em 05/06/2026** via ABRASF 2.04 — integração provada end-to-end. Emissão ainda **manual** (script); falta: `ConsultarUrlNfse` (PDF oficial), commit/deploy e **ligar a auto-emissão no webhook** (`NFSE_PADRAO=abrasf204` na VPS). Detalhes em `docs/fase2_nfse_df.md` + `docs/adr/ADR-0005-abrasf-2.04-rps.md`.
+- **Fase 3** — Deploy na VPS Hostinger (`iugu.megasuporte.com`, IP `72.62.11.230`). ✅ Concluída — backend, painel web, HTTPS, cron e hardening de segurança no ar. ⚠️ VPS compartilhada com produção (Asterisk/PBX + Apache+PHP + MariaDB): não mexer no firewall, no fuso, nem rodar `apt upgrade`; Apache serve de proxy reverso (não instalar nginx).
 
 **Antes de qualquer ação técnica:** confira a auto-memória (carregada automaticamente) — ela contém pendências vivas como rotação de credenciais e bloqueios cadastrais no Nota Control que podem invalidar o caminho "óbvio" sugerido pelo HANDOFF.
 
