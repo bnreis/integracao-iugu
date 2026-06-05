@@ -2533,10 +2533,52 @@ def _gravar_log_nfse(
         return caminho
     except Exception as exc:
         # Nunca derruba a emissão: o XML já foi arquivado e a nota já foi aceita.
-        logger.warning(
-            f"[NFS-e log] Falha ao gravar índice nfse_{invoice_id}.json: {exc} "
-            f"(emissão NÃO afetada — XML já arquivado)"
+        # ALERTA ALTO (M3): este arquivo é a fonte da anti-duplicata. Sem ele, um
+        # reprocessamento da MESMA fatura (retry de webhook, cron) não enxerga a nota
+        # já emitida pela regra 1 e pode disparar uma SEGUNDA emissão — documento
+        # fiscal duplicado, difícil de cancelar. Por isso elevamos para logger.error
+        # com instrução acionável: registrar manualmente a nota e tratar a fatura
+        # como JÁ EMITIDA até o índice ser recriado.
+        logger.error(
+            f"[NFS-e log] FALHA AO GRAVAR ÍNDICE nfse_{invoice_id}.json: {exc}. "
+            f"A NFS-e FOI EMITIDA (XML já arquivado), mas o índice .json é a base da "
+            f"ANTI-DUPLICATA — sem ele, um reprocessamento desta fatura pode emitir uma "
+            f"NFS-e DUPLICADA. AÇÃO MANUAL NECESSÁRIA: recriar/gravar o índice "
+            f"nfse_{invoice_id}.json (CNPJ {empresa.cnpj}, valor R$ {valor_reais:.2f}, "
+            f"data {date.today().isoformat()}) e NÃO reprocessar a fatura {invoice_id} "
+            f"antes de confirmar que a nota já existe no provedor."
         )
+        # (C4) FALLBACK best-effort: tenta gravar um índice MÍNIMO no MESMO caminho
+        # determinístico (nfse_<invoice_id>.json) para que a regra 1 da anti-duplicata
+        # ainda encontre evidência e BARRE uma reemissão. Se a falha original foi um
+        # erro pontual (ex.: serialização do payload completo), este índice enxuto
+        # tende a passar. Em try/except próprio — se falhar também, apenas loga; nunca
+        # derruba a emissão (a nota já foi aceita).
+        try:
+            caminho_min = Path(settings.nfse_output_dir) / f"nfse_{invoice_id}.json"
+            indice_minimo = {
+                "invoice_id": invoice_id,
+                "sucesso": True,
+                "numero_nfse": resultado.numero_nfse,
+                "codigo_verificacao": resultado.codigo_verificacao,
+                "cnpj": empresa.cnpj,
+                "valor": valor_reais,
+                "data_emissao": date.today().isoformat(),
+            }
+            caminho_min.write_text(
+                json.dumps(indice_minimo, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            logger.warning(
+                f"[NFS-e log] Índice MÍNIMO de fallback gravado em {caminho_min.name} "
+                f"(anti-duplicata preservada para a fatura {invoice_id})."
+            )
+        except Exception as exc_fallback:
+            logger.error(
+                f"[NFS-e log] Fallback do índice mínimo TAMBÉM falhou para "
+                f"nfse_{invoice_id}.json: {exc_fallback}. Anti-duplicata da regra 1 "
+                f"NÃO está garantida — reforça a AÇÃO MANUAL acima."
+            )
         return None
 
 

@@ -26,6 +26,7 @@ Para expor publicamente (webhooks + app):
 from __future__ import annotations
 
 import secrets
+from datetime import date
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -37,6 +38,17 @@ from .auth import usuario_autenticado
 from .config import settings
 from .iugu_client import IuguAPIError, IuguClient, extract_cnpj_from_invoice
 from .iugu_empresas import get_repo
+
+# M1 — lock cross-process por fatura + guardrail anti-duplicata. Movidos para o
+# módulo neutro src/nfse_guard.py (ADR: cron e webhook compartilham a MESMA
+# serialização). Importados aqui e chamados como nome simples para que os testes
+# que fazem patch.object(webhook_server, "_verificar_nfse_duplicada", ...)
+# continuem funcionando.
+from .nfse_guard import (  # noqa: F401  (reexportados no namespace de webhook_server)
+    _LOCK_INVOICE_TTL_SEGUNDOS,
+    _lock_invoice,
+    _verificar_nfse_duplicada,
+)
 
 app = FastAPI(
     title="Integração Iugu + NFS-e DF",
@@ -177,78 +189,6 @@ async def processar_manualmente(invoice_id: str):
 
 
 # ============================================================
-# Guardrail contra NFS-e duplicada
-# ============================================================
-def _verificar_nfse_duplicada(
-    invoice_id: str, cnpj: str, invoice: dict, empresa: Any = None
-) -> dict | None:
-    """
-    Verifica se já existe NFS-e emitida para esta fatura.
-    Guardrail BASEADO EM EVIDÊNCIA: só um log de emissão REAL bem-sucedido
-    (nfse_<invoice_id>.json com sucesso=True) prova que a nota existe.
-    Checa duas fontes:
-      1. Log local por invoice_id, com sucesso=True (nfse_emitidas/*.json)
-      2. Mesmo CNPJ + mesmo mês + mesmo valor nos logs reais (sucesso=True)
-         — anti-duplicata geral, usando os campos reais do log.
-
-    `empresa` é mantido na assinatura apenas por compatibilidade com os
-    chamadores; não é mais usado (a regra antiga de nf_na_criacao foi removida
-    porque pulava emissão por flag, não por evidência).
-
-    Retorna dict com detalhes se duplicata encontrada, None se ok.
-    """
-    from pathlib import Path
-    import json as _json
-
-    nfse_dir = Path(settings.nfse_output_dir)
-
-    # 1. Log local por invoice_id (só emissão REAL bem-sucedida prova a nota)
-    if nfse_dir.exists():
-        for log_file in nfse_dir.glob("*.json"):
-            try:
-                data = _json.loads(log_file.read_text(encoding="utf-8"))
-                if data.get("invoice_id") == invoice_id and data.get("sucesso") is True:
-                    return {
-                        "fonte": "log_local",
-                        "detalhe": f"Arquivo: {log_file.name}",
-                        "arquivo": log_file.name,
-                    }
-            except Exception:
-                continue
-
-    # 2. Anti-duplicata geral: mesmo CNPJ + mesmo mês + mesmo valor (campos reais)
-    if nfse_dir.exists():
-        valor_reais = round(
-            (int(invoice.get("total_paid_cents") or invoice.get("total_cents") or 0)) / 100.0,
-            2,
-        )
-        mes_ref = (invoice.get("paid_at") or "")[:7]  # "2026-04"
-
-        if valor_reais > 0 and len(mes_ref) == 7:
-            for log_file in nfse_dir.glob("*.json"):
-                try:
-                    data = _json.loads(log_file.read_text(encoding="utf-8"))
-                    if (
-                        data.get("sucesso") is True
-                        and data.get("cnpj") == cnpj
-                        and data.get("valor") == valor_reais
-                        and (data.get("data_emissao") or "")[:7] == mes_ref
-                    ):
-                        return {
-                            "fonte": "duplicata_mes_valor",
-                            "detalhe": (
-                                f"NFS-e já existe para CNPJ {cnpj} "
-                                f"no mês {mes_ref} com valor R$ {valor_reais:.2f}"
-                            ),
-                            "arquivo": log_file.name,
-                        }
-                except Exception:
-                    continue
-
-    return None
-
-
-# ============================================================
 # Lógica central
 # ============================================================
 async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
@@ -352,94 +292,112 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
             "motivo": "emitir_nf=False",
         }
 
-    # 4. GUARDRAIL: verifica se já existe NFS-e para este cliente/mês/valor
-    nfse_existente = _verificar_nfse_duplicada(invoice_id, cnpj, invoice, empresa)
-    if nfse_existente:
-        logger.warning(
-            f"⚠️ GUARDRAIL: NFS-e já existe para fatura {invoice_id} "
-            f"(CNPJ {cnpj}, {empresa.razao_social}). Fonte: {nfse_existente.get('fonte', '?')}"
-        )
-        return {
-            "success": False,
-            "invoice_id": invoice_id,
-            "cnpj": cnpj,
-            "empresa": empresa.razao_social,
-            "acao": "nfse_duplicada_bloqueada",
-            "error": f"NFS-e já emitida para esta fatura. {nfse_existente.get('detalhe', '')}",
-            "nfse_existente": nfse_existente,
-        }
-
-    # 5. Aciona emissão da NFS-e
-    logger.info(
-        f"CNPJ {cnpj} autorizado — emitindo NFS-e para {empresa.razao_social}"
-    )
-    try:
-        from .nfse_df import emitir_nfse
-
-        resultado_nfse = await emitir_nfse(invoice=invoice, empresa=empresa)
-
-        # WEB-011: rejeição da NFS-e (sucesso=False SEM exceção — ex.: erro de schema,
-        # IM não liberada) NÃO pode ser rotulada como "emitida". É falha terminal
-        # (re-tentar não resolve rejeição), mas precisa de registro honesto + alerta.
-        if not resultado_nfse.get("sucesso"):
-            mensagens = resultado_nfse.get("mensagens") or resultado_nfse.get("mensagem_erro")
-            logger.error(
-                f"❌ NFS-e REJEITADA para fatura {invoice_id} "
-                f"(CNPJ {cnpj}, {empresa.razao_social}): {mensagens}"
+    # 4+5. LOCK por invoice_id (M1): serializa verificar->emitir->gravar_log para a
+    # MESMA fatura, fechando a corrida entre o webhook re-entregue (retry da Iugu) e o
+    # cron de boletos (outro processo). Se outro processo VIVO já está emitindo esta
+    # fatura, não duplicamos — devolvemos "em_processamento" (success=True, sem stage
+    # recuperável → HTTP 200; a Iugu não re-tenta).
+    with _lock_invoice(invoice_id) as adquiriu_lock:
+        if not adquiriu_lock:
+            logger.warning(
+                f"[lock] Fatura {invoice_id} já está em emissão por outro processo "
+                f"(CNPJ {cnpj}, {empresa.razao_social}) — não emitindo de novo"
             )
             return {
-                "success": False,
-                # stage terminal — NÃO está em _STAGES_RECUPERAVEIS → HTTP 200 (não re-tenta).
-                "stage": "nfse_rejeitada",
+                "success": True,
                 "invoice_id": invoice_id,
                 "cnpj": cnpj,
                 "empresa": empresa.razao_social,
-                "acao": "nfse_rejeitada",
+                "acao": "em_processamento",
+                "motivo": "Outra emissão em andamento para esta fatura (lock)",
+            }
+
+        # 4. GUARDRAIL: verifica se já existe NFS-e para este cliente/mês/valor
+        nfse_existente = _verificar_nfse_duplicada(invoice_id, cnpj, invoice, empresa)
+        if nfse_existente:
+            logger.warning(
+                f"⚠️ GUARDRAIL: NFS-e já existe para fatura {invoice_id} "
+                f"(CNPJ {cnpj}, {empresa.razao_social}). Fonte: {nfse_existente.get('fonte', '?')}"
+            )
+            return {
+                "success": False,
+                "invoice_id": invoice_id,
+                "cnpj": cnpj,
+                "empresa": empresa.razao_social,
+                "acao": "nfse_duplicada_bloqueada",
+                "error": f"NFS-e já emitida para esta fatura. {nfse_existente.get('detalhe', '')}",
+                "nfse_existente": nfse_existente,
+            }
+
+        # 5. Aciona emissão da NFS-e
+        logger.info(
+            f"CNPJ {cnpj} autorizado — emitindo NFS-e para {empresa.razao_social}"
+        )
+        try:
+            from .nfse_df import emitir_nfse
+
+            resultado_nfse = await emitir_nfse(invoice=invoice, empresa=empresa)
+
+            # WEB-011: rejeição da NFS-e (sucesso=False SEM exceção — ex.: erro de schema,
+            # IM não liberada) NÃO pode ser rotulada como "emitida". É falha terminal
+            # (re-tentar não resolve rejeição), mas precisa de registro honesto + alerta.
+            if not resultado_nfse.get("sucesso"):
+                mensagens = resultado_nfse.get("mensagens") or resultado_nfse.get("mensagem_erro")
+                logger.error(
+                    f"❌ NFS-e REJEITADA para fatura {invoice_id} "
+                    f"(CNPJ {cnpj}, {empresa.razao_social}): {mensagens}"
+                )
+                return {
+                    "success": False,
+                    # stage terminal — NÃO está em _STAGES_RECUPERAVEIS → HTTP 200 (não re-tenta).
+                    "stage": "nfse_rejeitada",
+                    "invoice_id": invoice_id,
+                    "cnpj": cnpj,
+                    "empresa": empresa.razao_social,
+                    "acao": "nfse_rejeitada",
+                    "nfse": resultado_nfse,
+                }
+
+            # Sucesso: envia o e-mail e retorna como emitida.
+            try:
+                from .email_nfse import enviar_nfse_email
+
+                # ResultadoEmissao.to_dict() não traz valor/data_emissao — o template
+                # precisa deles. Enriquece o dict (sem mutar a chave 'nfse' do retorno)
+                # com os mesmos campos que o log .json e o reenvio manual usam, para
+                # que auto-envio e reenviar gerem e-mail IDÊNTICO.
+                total_cents = int(
+                    invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
+                )
+                dados_email = {
+                    **resultado_nfse,
+                    "valor": round(total_cents / 100.0, 2),
+                    "data_emissao": date.today().isoformat(),
+                    "razao_social": empresa.razao_social,
+                }
+                enviar_nfse_email(empresa, dados_email)
+            except ImportError:
+                logger.warning("Módulo email_nfse não disponível — NFS-e não enviada por e-mail")
+            except Exception as email_exc:
+                logger.error(f"Falha ao enviar NFS-e por e-mail: {email_exc}")
+
+            return {
+                "success": True,
+                "invoice_id": invoice_id,
+                "cnpj": cnpj,
+                "empresa": empresa.razao_social,
+                "acao": "nfse_emitida",
                 "nfse": resultado_nfse,
             }
-
-        # Sucesso: envia o e-mail e retorna como emitida.
-        try:
-            from datetime import date
-
-            from .email_nfse import enviar_nfse_email
-
-            # ResultadoEmissao.to_dict() não traz valor/data_emissao — o template
-            # precisa deles. Enriquece o dict (sem mutar a chave 'nfse' do retorno)
-            # com os mesmos campos que o log .json e o reenvio manual usam, para
-            # que auto-envio e reenviar gerem e-mail IDÊNTICO.
-            total_cents = int(
-                invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
-            )
-            dados_email = {
-                **resultado_nfse,
-                "valor": round(total_cents / 100.0, 2),
-                "data_emissao": date.today().isoformat(),
-                "razao_social": empresa.razao_social,
+        except Exception as exc:
+            logger.exception(f"Falha ao emitir NFS-e para fatura {invoice_id}")
+            return {
+                "success": False,
+                "stage": "emitir_nfse",
+                "invoice_id": invoice_id,
+                "cnpj": cnpj,
+                "error": str(exc),
             }
-            enviar_nfse_email(empresa, dados_email)
-        except ImportError:
-            logger.warning("Módulo email_nfse não disponível — NFS-e não enviada por e-mail")
-        except Exception as email_exc:
-            logger.error(f"Falha ao enviar NFS-e por e-mail: {email_exc}")
-
-        return {
-            "success": True,
-            "invoice_id": invoice_id,
-            "cnpj": cnpj,
-            "empresa": empresa.razao_social,
-            "acao": "nfse_emitida",
-            "nfse": resultado_nfse,
-        }
-    except Exception as exc:
-        logger.exception(f"Falha ao emitir NFS-e para fatura {invoice_id}")
-        return {
-            "success": False,
-            "stage": "emitir_nfse",
-            "invoice_id": invoice_id,
-            "cnpj": cnpj,
-            "error": str(exc),
-        }
 
 
 # ============================================================

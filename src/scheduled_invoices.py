@@ -271,38 +271,71 @@ def _emitir_nfse_para_fatura(
         logger.error(f"NFS-e {emp.cnpj}: falha ao buscar fatura {resultado.invoice_id}: {exc}")
         return
 
+    # FALHA ALTA corrigida: o cron emitia FORA do lock e do guardrail anti-duplicata,
+    # então webhook (pagamento) x cron (criação) podiam gerar DUAS notas da MESMA
+    # fatura. Agora o cron usa o MESMO lock cross-process e o MESMO guardrail do
+    # webhook (src/nfse_guard.py). Emitir NFS-e é documento fiscal — duplicar é o
+    # pior cenário.
+    from .nfse_guard import _lock_invoice, _verificar_nfse_duplicada
+
     try:
-        from .nfse_df import emitir_nfse
-        nfse_result = asyncio.run(emitir_nfse(invoice=invoice, empresa=emp))
-        if nfse_result.get("sucesso"):
-            resultado.nfse_emitida = True
-            resultado.nfse_resultado = nfse_result
-            logger.info(
-                f"📄 NFS-e emitida na criação: {emp.razao_social} — "
-                f"Nº {nfse_result.get('numero_nfse', '?')}"
-            )
-            # Só agora (emissão OK) marca a fatura como já tendo NFS-e na criação,
-            # para o webhook não reemitir no pagamento. Se isso falhar, o pior caso
-            # é o webhook tentar reemitir e ser barrado pelo guardrail anti-duplicata.
-            try:
-                client.update_invoice(
-                    resultado.invoice_id,
-                    custom_variables=[
-                        {"name": "nfse_emitida_na_criacao", "value": "true"}
-                    ],
+        with _lock_invoice(resultado.invoice_id) as adquiriu:
+            if not adquiriu:
+                # Outro processo VIVO (provavelmente o webhook do pagamento) já está
+                # emitindo esta fatura — não reemite.
+                resultado.nfse_erro = (
+                    "Outra emissão em andamento para esta fatura (lock) — não reemite"
                 )
-            except Exception as exc:
                 logger.warning(
-                    f"NFS-e {emp.cnpj}: emitida, mas falhou ao marcar "
-                    f"nfse_emitida_na_criacao=true na fatura {resultado.invoice_id}: {exc}"
+                    f"NFS-e {emp.cnpj}: lock ocupado para fatura {resultado.invoice_id} "
+                    f"(outra emissão em andamento) — não reemitindo"
                 )
-            _enviar_nfse_por_email(emp, nfse_result)
-        else:
-            resultado.nfse_erro = nfse_result.get("mensagem_erro", "erro desconhecido")
-            logger.error(
-                f"❌ NFS-e falhou na criação para {emp.razao_social}: "
-                f"{resultado.nfse_erro}"
-            )
+                return
+
+            # Guardrail anti-duplicata baseado em evidência (log .json real).
+            dup = _verificar_nfse_duplicada(resultado.invoice_id, emp.cnpj, invoice, emp)
+            if dup:
+                resultado.nfse_erro = (
+                    f"NFS-e já existe (guardrail: {dup.get('fonte')}) — não reemite"
+                )
+                logger.warning(
+                    f"⚠️ GUARDRAIL: NFS-e já existe para fatura {resultado.invoice_id} "
+                    f"({emp.cnpj}, {emp.razao_social}). Fonte: {dup.get('fonte', '?')} — "
+                    f"não reemitindo"
+                )
+                return
+
+            from .nfse_df import emitir_nfse
+            nfse_result = asyncio.run(emitir_nfse(invoice=invoice, empresa=emp))
+            if nfse_result.get("sucesso"):
+                resultado.nfse_emitida = True
+                resultado.nfse_resultado = nfse_result
+                logger.info(
+                    f"📄 NFS-e emitida na criação: {emp.razao_social} — "
+                    f"Nº {nfse_result.get('numero_nfse', '?')}"
+                )
+                # Só agora (emissão OK) marca a fatura como já tendo NFS-e na criação,
+                # para o webhook não reemitir no pagamento. Se isso falhar, o pior caso
+                # é o webhook tentar reemitir e ser barrado pelo guardrail anti-duplicata.
+                try:
+                    client.update_invoice(
+                        resultado.invoice_id,
+                        custom_variables=[
+                            {"name": "nfse_emitida_na_criacao", "value": "true"}
+                        ],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"NFS-e {emp.cnpj}: emitida, mas falhou ao marcar "
+                        f"nfse_emitida_na_criacao=true na fatura {resultado.invoice_id}: {exc}"
+                    )
+                _enviar_nfse_por_email(emp, nfse_result)
+            else:
+                resultado.nfse_erro = nfse_result.get("mensagem_erro", "erro desconhecido")
+                logger.error(
+                    f"❌ NFS-e falhou na criação para {emp.razao_social}: "
+                    f"{resultado.nfse_erro}"
+                )
     except Exception as exc:
         resultado.nfse_erro = f"erro inesperado: {exc}"
         logger.exception(f"NFS-e {emp.cnpj}: erro inesperado ao emitir")
