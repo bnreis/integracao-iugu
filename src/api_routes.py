@@ -461,6 +461,9 @@ async def criar_fatura(req: CriarFaturaRequest):
             "quantity": 1,
             "price_cents": req.valor_cents,
         }],
+        # Repassa o customer_id da empresa resolvida para que invoice.customer_id
+        # chegue preenchido no webhook (se ausente, create_invoice não o envia).
+        "customer_id": empresa.customer_id,
         "payer": {
             "cpf_cnpj": empresa.cnpj,
             "name": empresa.razao_social or "Cliente",

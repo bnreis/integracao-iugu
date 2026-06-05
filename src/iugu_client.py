@@ -119,6 +119,7 @@ class IuguClient:
         due_date: date | str,
         items: list[dict[str, Any]],
         *,
+        customer_id: Optional[str] = None,
         payer: Optional[dict[str, Any]] = None,
         payable_with: str | list[str] = "bank_slip",
         notification_url: Optional[str] = None,
@@ -146,6 +147,11 @@ class IuguClient:
             due_date: data de vencimento (objeto date ou string YYYY-MM-DD)
             items: lista de itens cobrados. Cada item: {description, quantity, price_cents}
                 Ex: [{"description": "Serviço X", "quantity": 1, "price_cents": 15000}]
+            customer_id: ID do cliente (customer) da Iugu dono da fatura. Quando
+                informado, a Iugu vincula a fatura ao customer e devolve esse mesmo
+                valor em `invoice.customer_id` no webhook — permitindo resolver a
+                empresa de forma não-ambígua (sem cair no fallback por CNPJ). Se
+                ausente/vazio, o comportamento atual é preservado (não enviado).
             payer: dados do pagador (obrigatório para boleto e pix)
                 Ex: {
                     "cpf_cnpj": "00.000.000/0001-00",
@@ -189,6 +195,10 @@ class IuguClient:
             "items": items,
             "payable_with": payable_with,
         }
+        # Vincula a fatura ao customer da Iugu para que invoice.customer_id chegue
+        # preenchido no webhook (resolução não-ambígua em multi-cliente).
+        if customer_id:
+            payload["customer_id"] = customer_id
         if payer:
             payload["payer"] = payer
         if notification_url:

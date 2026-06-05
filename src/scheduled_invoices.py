@@ -183,6 +183,9 @@ def criar_boleto_para_empresa(
             "price_cents": valor_cents,
         }],
         "payer": _empresa_para_payer(emp),
+        # Vincula a fatura ao customer da empresa iterada (chave única, não-ambígua):
+        # garante que invoice.customer_id chegue preenchido no webhook.
+        "customer_id": emp.customer_id,
         "payable_with": metodos,
         "expires_in": settings.fatura_dias_expiracao,
         "bank_slip_extra_due": settings.fatura_boleto_extra_due,
@@ -203,6 +206,11 @@ def criar_boleto_para_empresa(
             {"name": "nfse_emitida_na_criacao", "value": "false"},
         ],
     }
+
+    # Cadastro legado pode não ter customer_id; nesse caso create_invoice apenas
+    # não o envia (fallback por CNPJ no webhook). Logamos para diagnóstico.
+    if not emp.customer_id:
+        logger.debug(f"Empresa {emp.cnpj} sem customer_id — fatura criada sem vínculo de customer")
 
     close_client = False
     if client is None:

@@ -71,10 +71,14 @@ def _empresa_mock() -> MagicMock:
 def _rodar_processar_com_emissao(resultado_emissao: dict) -> dict:
     """Roda processar_pagamento com toda a cadeia externa mockada e
     emitir_nfse devolvendo `resultado_emissao`."""
+    # ADR-0003 Etapa 1: a fatura agora carrega customer_id e o webhook resolve a
+    # empresa por buscar_por_customer_id (caminho primário), não mais por CNPJ.
     invoice = {"id": "INV123", "status": "paid", "payer_cpf_cnpj": "12345678000199",
-               "custom_variables": []}
+               "customer_id": "cust_TESTE", "custom_variables": []}
+    empresa = _empresa_mock()
     repo = MagicMock()
-    repo.buscar_por_cnpj.return_value = _empresa_mock()
+    repo.buscar_por_customer_id.return_value = empresa  # caminho primário
+    repo.buscar_por_cnpj.return_value = empresa          # fallback (não deve ser usado aqui)
 
     async def fake_emitir(invoice, empresa):  # noqa: ARG001
         return resultado_emissao

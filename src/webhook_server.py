@@ -179,7 +179,9 @@ async def processar_manualmente(invoice_id: str):
 # ============================================================
 # Guardrail contra NFS-e duplicada
 # ============================================================
-def _verificar_nfse_duplicada(invoice_id: str, cnpj: str, invoice: dict) -> dict | None:
+def _verificar_nfse_duplicada(
+    invoice_id: str, cnpj: str, invoice: dict, empresa: Any = None
+) -> dict | None:
     """
     Verifica se já existe NFS-e emitida para esta fatura.
     Checa múltiplas fontes:
@@ -188,6 +190,11 @@ def _verificar_nfse_duplicada(invoice_id: str, cnpj: str, invoice: dict) -> dict
       3. Empresa com nf_na_criacao=True
       4. Custom variable 'nfse_emitida_na_criacao' na fatura da Iugu
       5. Mesmo CNPJ + mesmo mês + mesmo valor nos logs locais (anti-duplicata geral)
+
+    ADR-0003 Etapa 1: a regra 3 usa a `empresa` JÁ RESOLVIDA (por customer_id)
+    passada pelo chamador, em vez de re-resolver por CNPJ. Re-resolver por CNPJ
+    reintroduziria a ambiguidade multi-cliente (poderia checar nf_na_criacao do
+    departamento errado). `empresa` opcional para compatibilidade.
 
     Retorna dict com detalhes se duplicata encontrada, None se ok.
     """
@@ -219,10 +226,9 @@ def _verificar_nfse_duplicada(invoice_id: str, cnpj: str, invoice: dict) -> dict
                     "arquivo": dps_file.name,
                 }
 
-    # 3. Empresa com nf_na_criacao=True → NFS-e emitida junto com o boleto
+    # 3. Empresa com nf_na_criacao=True → NFS-e emitida junto com o boleto.
+    # Usa a empresa já resolvida (por customer_id) — não re-resolve por CNPJ.
     try:
-        repo = get_repo()
-        empresa = repo.buscar_por_cnpj(cnpj)
         if empresa and empresa.nf_na_criacao and empresa.emitir_nf:
             return {
                 "fonte": "nf_na_criacao",
@@ -310,16 +316,43 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
         logger.error(str(e))
         return {"success": False, "stage": "load_empresas", "error": str(e)}
 
-    empresa = repo.buscar_por_cnpj(cnpj)
+    # ADR-0003 Etapa 1: resolve a empresa pelo customer_id da fatura (chave única
+    # da Iugu), não por CNPJ. Um mesmo CNPJ pode ter vários customers/departamentos
+    # (ex.: ALMERIA tem 3) com config fiscal distinta; buscar_por_cnpj devolveria
+    # "o primeiro" e a NFS-e sairia com a alíquota/código de serviço/endereço do
+    # departamento ERRADO. customer_id elimina essa ambiguidade.
+    customer_id = invoice.get("customer_id")
+    empresa = None
+    if customer_id:
+        empresa = repo.buscar_por_customer_id(customer_id)
+        if not empresa:
+            # Pode ser customer recém-cadastrado que ainda não entrou no cache
+            # (TTL 300s — Onda 0). Faz UMA recarga forçada da Iugu e tenta de novo.
+            try:
+                repo = get_repo(forcar=True)
+                empresa = repo.buscar_por_customer_id(customer_id)
+            except Exception as e:
+                logger.error(str(e))
+                return {"success": False, "stage": "load_empresas", "error": str(e)}
+
+    # Fallback compatível: fatura antiga sem customer_id no payload, OU customer_id
+    # que não existe no repositório. Cai para buscar_por_cnpj (comportamento legado)
+    # — pode ser ambíguo em CNPJ multi-cliente, por isso registramos um warning.
     if not empresa:
-        # Pode ser empresa recém-cadastrada que ainda não entrou no cache (TTL 300s).
-        # Faz UMA recarga forçada da Iugu e tenta de novo antes de desistir.
-        try:
-            repo = get_repo(forcar=True)
-            empresa = repo.buscar_por_cnpj(cnpj)
-        except Exception as e:
-            logger.error(str(e))
-            return {"success": False, "stage": "load_empresas", "error": str(e)}
+        logger.warning(
+            f"ADR-0003 fallback: resolvendo fatura {invoice_id} por CNPJ {cnpj} "
+            f"(customer_id={customer_id or 'ausente'} não resolvido). "
+            f"Pode ser ambíguo em CNPJ com múltiplos customers."
+        )
+        empresa = repo.buscar_por_cnpj(cnpj)
+        if not empresa:
+            # Mantém a recarga forçada do cache também no caminho de fallback (Onda 0).
+            try:
+                repo = get_repo(forcar=True)
+                empresa = repo.buscar_por_cnpj(cnpj)
+            except Exception as e:
+                logger.error(str(e))
+                return {"success": False, "stage": "load_empresas", "error": str(e)}
     if not empresa:
         logger.info(
             f"CNPJ {cnpj} não está cadastrado como empresa autorizada — pulando emissão"
@@ -372,7 +405,7 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
         }
 
     # 4. GUARDRAIL: verifica se já existe NFS-e para este cliente/mês/valor
-    nfse_existente = _verificar_nfse_duplicada(invoice_id, cnpj, invoice)
+    nfse_existente = _verificar_nfse_duplicada(invoice_id, cnpj, invoice, empresa)
     if nfse_existente:
         logger.warning(
             f"⚠️ GUARDRAIL: NFS-e já existe para fatura {invoice_id} "
