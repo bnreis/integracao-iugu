@@ -301,6 +301,14 @@ class IuguClient:
 
         return self._request("GET", "/v1/invoices", params=params)
 
+    def update_invoice(self, invoice_id: str, **kwargs) -> dict[str, Any]:
+        """Atualiza uma fatura na Iugu (PUT /v1/invoices/{id}).
+        Aceita os mesmos campos de create_invoice (ex: custom_variables).
+        Campos não enviados não são alterados."""
+        payload = {k: v for k, v in kwargs.items() if v is not None}
+        logger.info(f"Atualizando fatura Iugu {invoice_id}")
+        return self._request("PUT", f"/v1/invoices/{invoice_id}", json=payload)
+
     def cancel_invoice(self, invoice_id: str) -> dict[str, Any]:
         """Cancela uma fatura pendente (sem reembolso — só funciona se não foi paga)."""
         logger.info(f"Cancelando fatura {invoice_id}")

@@ -4,6 +4,9 @@
  * Gerencia autenticação JWT, requisições e tratamento de erros.
  */
 
+import { Platform } from "react-native";
+import * as SecureStore from "expo-secure-store";
+
 // Detecta se estamos no navegador (localhost) ou no celular (IP da rede)
 const IS_WEB =
   typeof document !== "undefined" && typeof window !== "undefined";
@@ -13,21 +16,64 @@ const IS_WEB =
 const BASE_URL = IS_WEB ? "" : "https://iugu.megasuporte.com";
 
 // ============================================================
-// Token management — memória simples (funciona em todas plataformas)
-// No celular, futuramente pode usar SecureStore após build nativo
+// Token management — persistente e multiplataforma
+//   • Nativo (APK/iOS): expo-secure-store (Keychain / EncryptedSharedPreferences)
+//   • Web (painel): localStorage (SecureStore não existe no navegador)
+// Mantém um cache em memória (`_token`) para que `request()` continue
+// síncrono no caminho quente; a persistência é assíncrona.
 // ============================================================
+const TOKEN_KEY = "auth_token";
+
 let _token: string | null = null;
 
 function getToken(): string | null {
   return _token;
 }
 
-function saveToken(token: string): void {
+// Persiste o token no storage seguro da plataforma. Assíncrono.
+async function saveToken(token: string): Promise<void> {
   _token = token;
+  try {
+    if (Platform.OS === "web") {
+      window.localStorage.setItem(TOKEN_KEY, token);
+    } else {
+      await SecureStore.setItemAsync(TOKEN_KEY, token);
+    }
+  } catch (err) {
+    // Se a persistência falhar, segue só com o cache em memória (não derruba o login).
+    console.warn("saveToken: falha ao persistir token", err);
+  }
 }
 
-function clearToken(): void {
+// Remove o token da memória e do storage. Assíncrono.
+async function clearToken(): Promise<void> {
   _token = null;
+  try {
+    if (Platform.OS === "web") {
+      window.localStorage.removeItem(TOKEN_KEY);
+    } else {
+      await SecureStore.deleteItemAsync(TOKEN_KEY);
+    }
+  } catch (err) {
+    // Limpeza best-effort: o cache em memória já foi zerado acima.
+    console.warn("clearToken: falha ao remover token do storage", err);
+  }
+}
+
+// Hidrata o cache em memória a partir do storage persistido.
+// Chamado no boot do app (App.tsx) para restaurar a sessão após reload/F5.
+export async function hydrateToken(): Promise<boolean> {
+  try {
+    if (Platform.OS === "web") {
+      _token = window.localStorage.getItem(TOKEN_KEY);
+    } else {
+      _token = await SecureStore.getItemAsync(TOKEN_KEY);
+    }
+  } catch (err) {
+    console.warn("hydrateToken: falha ao ler token do storage", err);
+    _token = null;
+  }
+  return !!_token;
 }
 
 // ============================================================
@@ -68,7 +114,7 @@ async function request<T = any>(
     const data = await response.json().catch(() => null);
 
     if (response.status === 401) {
-      clearToken();
+      await clearToken();
       return { error: "Sessão expirada — faça login novamente", status: 401 };
     }
 
@@ -102,18 +148,14 @@ export async function login(
     false
   );
   if (res.data?.access_token) {
-    saveToken(res.data.access_token);
+    await saveToken(res.data.access_token);
     return { success: true };
   }
   return { success: false, error: res.error || "Falha no login" };
 }
 
 export async function logout(): Promise<void> {
-  clearToken();
-}
-
-export function isAuthenticated(): boolean {
-  return !!getToken();
+  await clearToken();
 }
 
 // ============================================================

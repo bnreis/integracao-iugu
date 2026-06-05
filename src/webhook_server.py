@@ -36,7 +36,7 @@ from loguru import logger
 from .auth import usuario_autenticado
 from .config import settings
 from .iugu_client import IuguAPIError, IuguClient, extract_cnpj_from_invoice
-from .iugu_empresas import EmpresasRepository
+from .iugu_empresas import get_repo
 
 app = FastAPI(
     title="Integração Iugu + NFS-e DF",
@@ -64,11 +64,9 @@ from .api_routes import api_router, auth_router
 app.include_router(auth_router)
 app.include_router(api_router)
 
-# Repositório de empresas (singleton — agora lê da Iugu)
-def get_repo() -> EmpresasRepository:
-    repo = EmpresasRepository()
-    repo.carregar(forcar=True)
-    return repo
+# Repositório de empresas: usa o get_repo() CACHEADO de iugu_empresas (TTL 300s),
+# importado acima. Evita o N+1 à Iugu (1 GET por customer) a cada webhook — antes
+# havia um get_repo() local aqui que fazia carregar(forcar=True) em toda chamada.
 
 
 # ============================================================
@@ -313,6 +311,15 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
         return {"success": False, "stage": "load_empresas", "error": str(e)}
 
     empresa = repo.buscar_por_cnpj(cnpj)
+    if not empresa:
+        # Pode ser empresa recém-cadastrada que ainda não entrou no cache (TTL 300s).
+        # Faz UMA recarga forçada da Iugu e tenta de novo antes de desistir.
+        try:
+            repo = get_repo(forcar=True)
+            empresa = repo.buscar_por_cnpj(cnpj)
+        except Exception as e:
+            logger.error(str(e))
+            return {"success": False, "stage": "load_empresas", "error": str(e)}
     if not empresa:
         logger.info(
             f"CNPJ {cnpj} não está cadastrado como empresa autorizada — pulando emissão"

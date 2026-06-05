@@ -306,6 +306,26 @@ async def listar_faturas(
     created_to: Optional[str] = Query(None, description="Data fim (YYYY-MM-DD)"),
 ):
     """Lista faturas da Iugu com filtros."""
+    # Valida as datas (YYYY-MM-DD) e converte para o formato ISO com timezone que
+    # a Iugu espera (mesmo padrão usado em dashboard()). Datas inválidas viravam
+    # um 502 opaco vindo da Iugu; agora retornam 422 com mensagem clara.
+    tz = "-03:00"
+
+    def _validar_data(valor: Optional[str], campo: str, fim_do_dia: bool) -> Optional[str]:
+        if not valor:
+            return None
+        try:
+            d = date.fromisoformat(valor.strip())
+        except ValueError:
+            raise HTTPException(
+                422, f"{campo} invalido: '{valor}'. Use o formato YYYY-MM-DD."
+            )
+        sufixo = "T23:59:59" if fim_do_dia else "T00:00:00"
+        return f"{d.isoformat()}{sufixo}{tz}"
+
+    created_from_iso = _validar_data(created_from, "created_from", fim_do_dia=False)
+    created_to_iso = _validar_data(created_to, "created_to", fim_do_dia=True)
+
     try:
         with IuguClient() as client:
             result = client.list_invoices(
@@ -313,8 +333,8 @@ async def listar_faturas(
                 limit=limite,
                 start=pagina * limite,
                 query=busca,
-                created_at_from=created_from,
-                created_at_to=created_to,
+                created_at_from=created_from_iso,
+                created_at_to=created_to_iso,
             )
     except IuguAPIError as e:
         raise HTTPException(502, f"Erro Iugu: {e.message}")

@@ -128,7 +128,7 @@ function AlertCard({
   icon: string;
   label: string;
   count: number;
-  valor: string;
+  valor?: string; // opcional: nem toda pendência tem total monetário agregado no payload
   color: string;
   items?: Array<{
     line1: string;
@@ -147,7 +147,9 @@ function AlertCard({
         <Ionicons name={icon as any} size={20} color={color} />
         <View style={{ flex: 1, marginLeft: 10 }}>
           <Text style={[styles.alertTitle, { color }]}>{count} {label}</Text>
-          <Text style={styles.alertValor}>Total: R$ {valor}</Text>
+          {valor != null && (
+            <Text style={styles.alertValor}>Total: R$ {valor}</Text>
+          )}
         </View>
       </View>
       {items && items.length > 0 && (
@@ -493,8 +495,10 @@ export default function DashboardScreen() {
                 icon="document-attach"
                 label="NFS-e pendente(s)"
                 count={data.pendencias.nfse_pendentes}
-                valor={data.pendencias.top_nfse_pendentes
-                  .reduce((acc, x) => acc, "—")}
+                // O backend (api_routes.py dashboard()) só envia a contagem `nfse_pendentes`,
+                // não um total monetário agregado. A lista `top_nfse_pendentes` é limitada a 5 itens,
+                // então somá-la subestimaria o valor quando há mais pendências. Por isso omitimos
+                // `valor`: o card já exibe a contagem correta via `count`.
                 color="#f59e0b"
                 itemLabel="Pagamentos sem NFS-e:"
                 items={data.pendencias.top_nfse_pendentes.map((n) => ({

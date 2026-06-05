@@ -195,7 +195,12 @@ def criar_boleto_para_empresa(
             {"name": "tipo", "value": "boleto_recorrente"},
             {"name": "cnpj_tomador", "value": emp.cnpj},
             {"name": "data_referencia", "value": data_criacao.isoformat()},
-            {"name": "nfse_emitida_na_criacao", "value": "true" if emp.nf_na_criacao else "false"},
+            # Sempre "false" na criação. Só vira "true" APÓS a emissão da NFS-e
+            # retornar sucesso (ver _emitir_nfse_para_fatura). Se a emissão falhar,
+            # a flag fica "false" e o webhook reprocessa a nota no pagamento —
+            # antes a flag era gravada "true" aqui mesmo se a emissão falhasse,
+            # fazendo o webhook pular uma nota que nunca saiu (perda silenciosa).
+            {"name": "nfse_emitida_na_criacao", "value": "false"},
         ],
     }
 
@@ -268,6 +273,21 @@ def _emitir_nfse_para_fatura(
                 f"📄 NFS-e emitida na criação: {emp.razao_social} — "
                 f"Nº {nfse_result.get('numero_nfse', '?')}"
             )
+            # Só agora (emissão OK) marca a fatura como já tendo NFS-e na criação,
+            # para o webhook não reemitir no pagamento. Se isso falhar, o pior caso
+            # é o webhook tentar reemitir e ser barrado pelo guardrail anti-duplicata.
+            try:
+                client.update_invoice(
+                    resultado.invoice_id,
+                    custom_variables=[
+                        {"name": "nfse_emitida_na_criacao", "value": "true"}
+                    ],
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"NFS-e {emp.cnpj}: emitida, mas falhou ao marcar "
+                    f"nfse_emitida_na_criacao=true na fatura {resultado.invoice_id}: {exc}"
+                )
             _enviar_nfse_por_email(emp, nfse_result)
         else:
             resultado.nfse_erro = nfse_result.get("mensagem_erro", "erro desconhecido")

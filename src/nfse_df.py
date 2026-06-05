@@ -28,7 +28,9 @@ Referências:
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -483,6 +485,90 @@ def _normalizar_cTribNac(codigo_servico: str) -> str:
 # Numeração de DPS (persistente em arquivo)
 # =============================================================================
 _COUNTER_FILE = Path(settings.nfse_output_dir) / ".contador_dps.json"
+_COUNTER_LOCK_FILE = Path(settings.nfse_output_dir) / ".contador_dps.lock"
+
+# Idade (em segundos) a partir da qual o lockfile é considerado órfão (stale).
+# A seção crítica real é escrever ~50 bytes em disco (milissegundos), então 30s
+# é MUITO acima do tempo legítimo: só removemos o lock de outro processo se ele
+# estiver realmente travado/morto, nunca de um processo vivo porém lento.
+_LOCK_STALE_SEG = 30.0
+
+
+def _adquirir_lock_contador(timeout: float = 10.0) -> int:
+    """Adquire um lock ENTRE PROCESSOS para o contador da DPS.
+
+    O webhook (uvicorn) e o cron de boletos são processos separados; sem lock,
+    o read-modify-write do contador pode gerar números de DPS duplicados.
+
+    Usa um lockfile via os.open(..., O_CREAT | O_EXCL): a criação exclusiva é
+    atômica tanto no Windows quanto no Linux, sem depender de bibliotecas
+    externas (fcntl/msvcrt não são portáteis). Faz retry com backoff curto.
+
+    Recuperação de stale lock por IDADE do arquivo: enquanto o lockfile for mais
+    novo que `_LOCK_STALE_SEG`, apenas fazemos backoff (assumimos que o dono está
+    vivo). Só removemos o lockfile se ele estiver órfão há mais que esse limiar —
+    assim não apagamos o lock de um processo vivo porém lento (o que reabriria a
+    corrida de numeração). Se o timeout total se esgotar sem aquisição, levantamos
+    exceção em vez de seguir sem lock.
+
+    Returns:
+        O file descriptor do lockfile (deve ser liberado por _liberar_lock_contador).
+
+    Raises:
+        TimeoutError: se não conseguir adquirir o lock dentro do timeout total.
+    """
+    Path(settings.nfse_output_dir).mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    espera = 0.02
+    while True:
+        try:
+            fd = os.open(str(_COUNTER_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            # Grava identidade + timestamp para diagnóstico e para a checagem de idade.
+            os.write(fd, f"{os.getpid()}\n{time.time()}".encode("utf-8"))
+            return fd
+        except FileExistsError:
+            # Lockfile existe: só recupera se estiver órfão há mais que _LOCK_STALE_SEG.
+            try:
+                idade = time.time() - os.path.getmtime(str(_COUNTER_LOCK_FILE))
+            except FileNotFoundError:
+                # Foi liberado entre o open e o getmtime — tenta criar de novo já.
+                continue
+            if idade > _LOCK_STALE_SEG:
+                logger.warning(
+                    f"Lock do contador DPS órfão há {idade:.0f}s "
+                    f"(>{_LOCK_STALE_SEG:.0f}s) — removendo lockfile stale"
+                )
+                try:
+                    _COUNTER_LOCK_FILE.unlink()
+                except FileNotFoundError:
+                    pass
+                continue  # tenta recriar imediatamente
+            if time.monotonic() >= deadline:
+                # Lock ainda fresco (dono provavelmente vivo) e estouramos o timeout:
+                # falhar é mais seguro que seguir sem lock e duplicar numeração.
+                raise TimeoutError(
+                    f"Não foi possível adquirir o lock do contador DPS em {timeout}s "
+                    f"(lockfile vivo há {idade:.1f}s)"
+                )
+            time.sleep(espera)
+            espera = min(espera * 2, 0.25)  # backoff exponencial limitado
+
+
+def _liberar_lock_contador(fd: int) -> None:
+    """Libera o lock do contador: fecha o fd e remove o lockfile.
+
+    Só chegamos aqui se NÓS criamos o lock, então o unlink é nosso. Ainda assim
+    protegemos contra FileNotFoundError: um stale-recovery legítimo de outro
+    processo pode ter removido o arquivo, e não queremos estourar no finally.
+    """
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        _COUNTER_LOCK_FILE.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _proximo_numero_dps() -> str:
@@ -491,15 +577,22 @@ def _proximo_numero_dps() -> str:
     Retorna o número SEM zeros à esquerda (ex: "16", não "000000000000016").
     O XSD v1.01 (TSNumDPS) exige pattern [1-9]{1}[0-9]{0,14} — sem leading zeros.
     O zero-padding para o Id da DPS (45 chars) é feito em _montar_xml_dps().
+
+    O read-modify-write é protegido por um lock entre processos (lockfile) para
+    evitar número duplicado quando webhook e cron de boletos rodam ao mesmo tempo.
     """
     Path(settings.nfse_output_dir).mkdir(parents=True, exist_ok=True)
-    if _COUNTER_FILE.exists():
-        data = json.loads(_COUNTER_FILE.read_text(encoding="utf-8"))
-    else:
-        data = {"ultimo_numero": 0}
-    data["ultimo_numero"] = int(data.get("ultimo_numero", 0)) + 1
-    _COUNTER_FILE.write_text(json.dumps(data), encoding="utf-8")
-    return str(data["ultimo_numero"])
+    fd = _adquirir_lock_contador()
+    try:
+        if _COUNTER_FILE.exists():
+            data = json.loads(_COUNTER_FILE.read_text(encoding="utf-8"))
+        else:
+            data = {"ultimo_numero": 0}
+        data["ultimo_numero"] = int(data.get("ultimo_numero", 0)) + 1
+        _COUNTER_FILE.write_text(json.dumps(data), encoding="utf-8")
+        return str(data["ultimo_numero"])
+    finally:
+        _liberar_lock_contador(fd)
 
 
 # =============================================================================

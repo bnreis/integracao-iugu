@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Fases:**
 - **Fase 1** — webhook Iugu → planilha → decisão de emissão. Estável.
 - **Fase 2** — emissão NFS-e DF via webservice Nota Control. XML v1.01 validado contra XSD; status de produção/homologação muda — confira HANDOFF + auto-memória.
-- **Fase 3** — VPS Hostinger (não iniciada).
+- **Fase 3** — Deploy na VPS Hostinger (`iugu.megasuporte.com`, IP `72.62.11.230`). **Em andamento** via runbook vivo `docs/deploy_vps.md`. ⚠️ VPS compartilhada com produção (Asterisk/PBX + Apache+PHP + MariaDB): não mexer no firewall, no fuso, nem rodar `apt upgrade`; Apache existente serve de proxy reverso (não instalar nginx).
 
 **Antes de qualquer ação técnica:** confira a auto-memória (carregada automaticamente) — ela contém pendências vivas como rotação de credenciais e bloqueios cadastrais no Nota Control que podem invalidar o caminho "óbvio" sugerido pelo HANDOFF.
 
@@ -26,6 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **`docs/HANDOFF_OPUS46.md`** ⭐ — estado atual, último erro, próximo passo. Atualizado a cada sessão.
 2. **`docs/fase2_nfse_df.md`** — detalhes técnicos da Fase 2 (operação SOAP, padrões, endpoints).
 3. **`docs/scheduling.md`** — Task Scheduler para boletos recorrentes (Fase 1).
+4. **`docs/deploy_vps.md`** — runbook vivo do deploy na VPS (Fase 3). Executar **um bloco por vez** no SSH, confirmando a saída antes do próximo.
 
 > ⚠️ **`README.md` está desatualizado** — ainda lista Fase 2 como "não iniciada" e menciona Flutter. **Não confie nele para estado atual**; use HANDOFF + este CLAUDE.md.
 
@@ -34,6 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docs/manual_oficial_integracao/Manual_integracao_v101.pdf` — Manual oficial Nota Control v1.01 (109 páginas, 17/03/2026). **Fonte da verdade** para XML, operações, códigos de erro.
 - `docs/exemplos_oficiais/GerarNfseEnvio.xml` — template oficial v1.01 com todos os campos comentados (1.077 linhas).
 - `docs/exemplos_oficiais/schema_v101.xsd.xml` — XSD oficial v1.01 (5.140 linhas).
+- `docs/relatorio-integracao-nfse-df.md` ⭐ — **pesquisa de contexto da Fase 2** (provedor ISSnet/Nota Control, ABRASF 2.04 vs Padrão Nacional/DPS, cronograma DF, libs e agregadores). ⚠️ **Pista crítica:** o DF **não usa "inscrição municipal" tradicional — usa o CF/DF (Cadastro Fiscal do DF)**; possível causa-raiz do bloqueio E043/IM em produção. Prazo de adequação ao Padrão Nacional **prorrogado até 30/06/2026**.
 
 ---
 
@@ -140,7 +142,7 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 ```
 
 **Fonte de dados de empresas: a Iugu (NÃO a planilha).** Confirmado por inspeção dos imports + execução real em 2026-05-30.
-- `src/iugu_empresas.py` — **fonte ativa em produção**. Lê todos os customers da Iugu e monta a config de negócio (`codigo_servico`, `aliquota_iss`, `emitir_nf`, etc.) a partir do campo `notes` (JSON) de cada cliente. Importado por `webhook_server`, `scheduled_invoices`, `nfse_df`, `email_nfse` e `api_routes`.
+- `src/iugu_empresas.py` — **fonte ativa em produção**. Lê todos os customers da Iugu e monta a config de negócio (`codigo_servico`, `aliquota_iss`, `emitir_nf`, etc.) a partir do campo `notes` (JSON) de cada cliente. Importado por `webhook_server`, `scheduled_invoices`, `nfse_df`, `email_nfse` e `api_routes`. **Multi-cliente:** o repositório indexa empresas por `customer_id` (chave única), não por CNPJ — um mesmo CNPJ pode ter múltiplos customers na Iugu. Use `buscar_por_customer_id()`; `buscar_por_cnpj()`/`listar_por_cnpj()` existem por compatibilidade.
 - `src/spreadsheet.py` — **legado**. Lê `empresas_autorizadas.xlsx`. Só sobrevive em scripts utilitários (`emitir_nfse_manual`, `import_clients_from_iugu`, `test_connection`, etc.). ⚠️ O xlsx está **desatualizado e divergente da Iugu** — não use como fonte nem confie nesses scripts para dados reais.
 
 **Por que o "patch v1.01"?** A `nfelib` ainda emite XML no schema v1.00, mas o DF rejeita com E160 (Reforma Tributária mudou estrutura). `nfse_df.py` gera v1.00 e aplica 5 transformações via `lxml` para virar v1.01 válido — ver `_patch_xml_para_v101()`. Os 4 bugs específicos do schema estão tabulados em **Histórico de bugs** abaixo.
@@ -185,6 +187,14 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 - Preferência de teste: por **fluxo de negócio** (fatura → pago → webhook → NFS-e → email), não por camada técnica isolada.
 
 ---
+
+## 🔒 Hardening de segurança (Fase 8)
+
+Já aplicado no backend — não regredir sem motivo:
+- **Login** (`src/auth.py`): credenciais comparadas com `secrets.compare_digest` (tempo constante) + rate limit no endpoint de login.
+- **CORS restrito** a origens conhecidas (não usar `allow_origins=["*"]`).
+- **JWT obrigatório** em rotas sensíveis, incluindo `/empresas` e `/processar/{id}`.
+- **Docs do FastAPI desativados** (`/docs`, `/redoc`, OpenAPI) em produção.
 
 ## 🐛 Histórico de bugs do schema v1.01 (referência)
 
