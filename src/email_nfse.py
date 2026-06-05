@@ -279,7 +279,15 @@ def montar_email_nfse(
     valor_fmt = _formatar_valor_brl(dados.get("valor"))
     razao_tomador = empresa.razao_social or "Cliente"
 
-    msg = MIMEMultipart("related")
+    # Estrutura MIME canônica para "corpo HTML + logo inline + anexo":
+    #   multipart/mixed
+    #   ├── multipart/related   (corpo)
+    #   │   ├── text/html       (template)
+    #   │   └── image/png       (logo inline, CID)
+    #   └── application/xml     (anexo NFS-e)
+    # Anexo NÃO pode ficar dentro do "related": alguns clientes (Gmail) passam
+    # a tratar o anexo como conteúdo principal e somem com o corpo HTML.
+    msg = MIMEMultipart("mixed")
     msg["From"] = f"{settings.smtp_remetente_nome} <{_remetente()}>"
     msg["To"] = empresa.email or ""
     msg["Subject"] = f"NFS-e nº {numero_nfse} — {_PRESTADOR_NOME}"
@@ -294,20 +302,23 @@ def montar_email_nfse(
         data_emissao=str(data_emissao) if data_emissao else None,
         valor_fmt=valor_fmt,
     )
-    msg.attach(MIMEText(html, "html", "utf-8"))
 
-    # Logo inline (CID) — só se o arquivo existir.
+    # Corpo = multipart/related (HTML + logo inline referenciada por CID).
+    corpo = MIMEMultipart("related")
+    corpo.attach(MIMEText(html, "html", "utf-8"))
     if LOGO_PATH.exists():
         try:
             with open(LOGO_PATH, "rb") as f:
                 img = MIMEImage(f.read())
             img.add_header("Content-ID", f"<{_LOGO_CID}>")
             img.add_header("Content-Disposition", "inline", filename=LOGO_PATH.name)
-            msg.attach(img)
+            corpo.attach(img)
         except Exception as exc:
             logger.warning(f"Falha ao embutir logo {LOGO_PATH}: {exc}")
+    msg.attach(corpo)
 
-    # Anexo: XML da NFS-e oficial. Se não houver, envia mesmo assim (warning).
+    # Anexo: XML da NFS-e oficial, no nível "mixed". Se não houver, envia mesmo
+    # assim (warning).
     if not _anexar_xml_nfse(msg, dados, numero_nfse):
         logger.warning(
             f"XML da NFS-e Nº {numero_nfse} não encontrado — e-mail enviado SEM anexo "
