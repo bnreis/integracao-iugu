@@ -429,9 +429,12 @@ export default function FaturasScreen() {
 
       {/* Lista */}
       <View ref={wrapperRef} style={{ flex: 1 }}>
-        {/* Só mostra o spinner do pull quando JÁ há dados (refresh). No load
-            inicial (lista vazia) fica só o ActivityIndicator central — evita 2 spinners. */}
-        <PullIndicator pull={pull} refreshing={loading && faturas.length > 0} />
+        {/* PullIndicator é o pull-to-refresh do WEB. No nativo (APK) quem cuida é
+            o RefreshControl — renderizar os dois juntos mostrava 2 spinners.
+            Só no web; e só com dados (no load inicial fica o spinner central). */}
+        {Platform.OS === "web" && (
+          <PullIndicator pull={pull} refreshing={loading && faturas.length > 0} />
+        )}
         <FlatList
           data={faturas}
           keyExtractor={(item) => item.id}

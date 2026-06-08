@@ -317,7 +317,9 @@ export default function DashboardScreen() {
 
   return (
     <View ref={wrapperRef} style={{ flex: 1 }}>
-      <PullIndicator pull={pull} refreshing={loading} />
+      {/* PullIndicator é o pull-to-refresh do WEB; no nativo (APK) quem cuida é o
+          RefreshControl. Renderizar os dois juntos mostrava 2 spinners. */}
+      {Platform.OS === "web" && <PullIndicator pull={pull} refreshing={loading} />}
       <ScrollView
         style={styles.container}
         onScroll={(e) => {
