@@ -260,10 +260,10 @@ export default function DashboardScreen() {
         const res = await emitirNfse(invoiceId);
         setActionLoading(null);
         if (res.data?.success) {
-          alertMsg("Sucesso", `NFS-e: ${res.data.acao || "processada"}`);
+          alertMsg("Sucesso", "Nota Fiscal emitida e enviada com sucesso!");
           fetchData();
         } else {
-          alertMsg("Erro", res.data?.error || res.error || "Falha ao emitir NFS-e");
+          alertMsg("Erro", "Não foi possível emitir a Nota Fiscal para esta fatura.");
         }
       },
     );
@@ -278,10 +278,10 @@ export default function DashboardScreen() {
         const res = await cancelarFatura(invoiceId);
         setActionLoading(null);
         if (res.data) {
-          alertMsg("Sucesso", "Fatura cancelada");
+          alertMsg("Sucesso", "Fatura cancelada com sucesso.");
           fetchData();
         } else {
-          alertMsg("Erro", res.error || "Falha ao cancelar");
+          alertMsg("Erro", "Não foi possível cancelar a fatura. Tente novamente.");
         }
       },
     );
@@ -325,7 +325,10 @@ export default function DashboardScreen() {
         }}
         scrollEventThrottle={16}
         refreshControl={
-          <RefreshControl refreshing={loading} onRefresh={fetchData} />
+          // Web usa o PullIndicator custom (acima); evita o 2º spinner.
+          Platform.OS === "web" ? undefined : (
+            <RefreshControl refreshing={loading} onRefresh={fetchData} />
+          )
         }
       >
       {/* Header */}

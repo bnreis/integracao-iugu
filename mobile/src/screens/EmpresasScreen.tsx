@@ -183,9 +183,9 @@ export default function EmpresasScreen({ navigation }: any) {
     setSaving(false);
     if (res.data?.sucesso) {
       setFaturaModalVisible(false);
-      alertMsg("Sucesso", `Fatura criada!\nID: ${res.data.id}`);
+      alertMsg("Sucesso", "Fatura criada com sucesso!");
     } else {
-      alertMsg("Erro", res.error || res.data?.error || "Falha ao criar fatura");
+      alertMsg("Erro", "Não foi possível criar a fatura. Verifique os dados e tente novamente.");
     }
   };
 
@@ -211,9 +211,9 @@ export default function EmpresasScreen({ navigation }: any) {
         const res = await emitirNfse(ultimaFatura.id);
         setSaving(false);
         if (res.data?.success) {
-          alertMsg("Sucesso", `NFS-e: ${res.data.acao || "processada"}\nFatura: ${ultimaFatura.id}`);
+          alertMsg("Sucesso", "Nota Fiscal emitida e enviada com sucesso!");
         } else {
-          alertMsg("Erro", res.data?.error || res.error || "Falha ao emitir NFS-e");
+          alertMsg("Erro", "Não foi possível emitir a Nota Fiscal para esta empresa.");
         }
       },
     );
@@ -352,7 +352,10 @@ export default function EmpresasScreen({ navigation }: any) {
           }}
           scrollEventThrottle={16}
           refreshControl={
-            <RefreshControl refreshing={loading} onRefresh={fetchEmpresas} />
+            // Web usa o PullIndicator custom (acima); evita o 2º spinner.
+            Platform.OS === "web" ? undefined : (
+              <RefreshControl refreshing={loading} onRefresh={fetchEmpresas} />
+            )
           }
           contentContainerStyle={styles.lista}
           ListEmptyComponent={

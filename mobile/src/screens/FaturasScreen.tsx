@@ -228,11 +228,11 @@ export default function FaturasScreen() {
       async () => {
         const res = await cancelarFatura(id);
         if (res.data?.sucesso) {
-          alertMsg("Sucesso", res.data?.mensagem || "Fatura cancelada");
+          alertMsg("Sucesso", "Fatura cancelada com sucesso.");
           setModalVisible(false);
           fetchFaturas();
         } else {
-          alertMsg("Erro", res.data?.mensagem || res.error || "Falha ao cancelar");
+          alertMsg("Erro", "Não foi possível cancelar a fatura. Tente novamente.");
         }
       },
     );
@@ -247,9 +247,9 @@ export default function FaturasScreen() {
         const res = await emitirNfse(id);
         setActionLoading(false);
         if (res.data?.success) {
-          alertMsg("Sucesso", `NFS-e: ${res.data.acao || "processada"}`);
+          alertMsg("Sucesso", "Nota Fiscal emitida e enviada com sucesso!");
         } else {
-          alertMsg("Erro", res.data?.error || res.error || "Falha ao emitir NFS-e");
+          alertMsg("Erro", "Não foi possível emitir a Nota Fiscal para esta fatura.");
         }
       },
     );
@@ -268,9 +268,14 @@ export default function FaturasScreen() {
         const res = await reenviarNfseEmail(id);
         setActionLoading(false);
         if (res.data?.sucesso) {
-          alertMsg("Sucesso", res.data.mensagem);
+          alertMsg(
+            "Sucesso",
+            isNfse
+              ? "Nota Fiscal reenviada por e-mail com sucesso."
+              : "E-mail de cobrança reenviado com sucesso."
+          );
         } else {
-          alertMsg("Erro", res.data?.mensagem || res.error || "Falha ao reenviar");
+          alertMsg("Erro", res.error || "Não foi possível reenviar o e-mail. Tente novamente.");
         }
       },
     );
@@ -289,13 +294,14 @@ export default function FaturasScreen() {
     setActionLoading(false);
     if (res.data?.sucesso) {
       if (res.data?.nfse_emitida === true) {
-        alertMsg("Sucesso", res.data.mensagem || "Baixa registrada e NFS-e emitida.");
+        alertMsg(
+          "Sucesso",
+          "Fatura baixada com sucesso! A Nota Fiscal foi emitida e enviada automaticamente."
+        );
       } else {
         alertMsg(
-          "Baixa registrada — atenção",
-          res.data.mensagem ||
-            res.data.error ||
-            "A baixa foi registrada, mas a NFS-e NÃO foi emitida. Verifique e emita manualmente."
+          "Sucesso",
+          "Fatura baixada com sucesso! A Nota Fiscal não foi emitida para este cliente."
         );
       }
       setBaixaInvoiceId(null);
@@ -433,7 +439,11 @@ export default function FaturasScreen() {
           }}
           scrollEventThrottle={16}
           refreshControl={
-            <RefreshControl refreshing={loading} onRefresh={fetchFaturas} />
+            // No web o pull-to-refresh é o PullIndicator custom (acima); evita o
+            // 2º spinner do RefreshControl. No nativo, o RefreshControl é o gesto.
+            Platform.OS === "web" ? undefined : (
+              <RefreshControl refreshing={loading} onRefresh={fetchFaturas} />
+            )
           }
           contentContainerStyle={styles.lista}
           ListEmptyComponent={
