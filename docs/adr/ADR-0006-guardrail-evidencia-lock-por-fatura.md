@@ -1,0 +1,86 @@
+# ADR-0006 — Guardrail anti-duplicata baseado em evidência + lock por fatura (cross-process)
+
+- **Status:** Aceito (implementado e deployado em produção — commit `909ac61`, 06/06/2026)
+- **Contexto da decisão:** antes de **ligar a emissão automática** de NFS-e no pagamento.
+- **Relação com outros ADRs:** mitigação tática que antecipa, em arquivo, parte do que o
+  **ADR-0001 (SQLite)** + **ADR-0002 (UNIQUE(invoice_id))** resolveriam de forma definitiva.
+  Não substitui esses ADRs — quando o SQLite entrar, o lock/guardrail migram para o banco.
+
+---
+
+## Contexto
+
+A emissão de NFS-e gera **documento fiscal**, difícil de cancelar (o Bruno classificou o
+cancelamento como contraindicado). Ao ligar a **auto-emissão** (fatura paga → emite sozinha),
+duas classes de risco ficam expostas:
+
+1. **Falso "já emitida" por flag.** O guardrail antigo bloqueava/pulava a emissão com base em
+   sinais **frágeis**: a flag `nf_na_criacao` da empresa, a custom_variable
+   `nfse_emitida_na_criacao` da fatura e a existência de arquivos `dps_*` (artefatos de
+   dry-run). Isso causava **falso-positivo** (marcar como emitida sem nota real — bug que
+   apareceu no painel) e a regra de anti-duplicata por CNPJ+mês+valor estava **morta** (comparava
+   `valor_cents`/`competencia`, campos que o log nunca gravou).
+
+2. **NFS-e duplicada por concorrência.** O webhook (uvicorn) e o **cron** de boletos rodam em
+   **processos distintos**. A Iugu **reentrega** webhooks (retry em 502). Sem serialização, dois
+   eventos da mesma fatura podiam passar pela verificação antes de qualquer log existir e **emitir
+   duas notas reais**. Agravante: o cron emitia **fora** de qualquer guardrail.
+
+## Decisão
+
+1. **Guardrail baseado em EVIDÊNCIA.** A única prova de que a nota existe é o log de emissão
+   **real bem-sucedida** `nfse_<invoice_id>.json` com `sucesso=true` (gravado por
+   `_gravar_log_nfse` apenas em sucesso). Duas regras:
+   - **Regra 1 (primária):** abrir o arquivo determinístico `nfse_<invoice_id>.json` e bloquear
+     se `sucesso=true`.
+   - **Regra 2 (backstop):** mesmo CNPJ + mesmo valor (em reais) + mesmo mês, usando os campos
+     reais do log; o mês casa contra `paid_at[:7]` **ou** o mês corrente (cobre reprocessamento
+     na virada do mês).
+   - Removidos os gatilhos por flag (`nf_na_criacao`, custom_variable) e por `dps_*`.
+
+2. **Lock por `invoice_id` (cross-process).** Módulo neutro **`src/nfse_guard.py`** com um
+   context manager `_lock_invoice(invoice_id)` baseado em lockfile atômico
+   (`os.open(O_CREAT|O_EXCL)`), compartilhado por **webhook e cron**. Serializa o trecho
+   *verificar → emitir → gravar_log* da mesma fatura.
+   - **Staleness robusto:** lock considerado órfão se `idade > TTL (300s)` **ou** se o **PID**
+     gravado não estiver mais vivo (`os.kill(pid, 0)`, política conservadora: na dúvida, trata
+     como vivo — nunca reclama lock de processo lento). TTL de 300s cobre o pior caso da seção
+     crítica (SOAP ~60s + SMTP + IO).
+   - **Ocupado por outro processo vivo** → não emite; webhook devolve `acao="em_processamento"`
+     (HTTP 200, sem retry).
+
+3. **Resiliência da evidência.** Se `_gravar_log_nfse` falhar ao gravar o índice, eleva para
+   `logger.error` (alerta acionável) e tenta um **fallback de índice mínimo** no mesmo caminho
+   determinístico, para a Regra 1 continuar barrando reemissão. Nunca derruba a emissão (a nota
+   já foi aceita).
+
+## Alternativas consideradas
+
+- **SQLite com `UNIQUE(invoice_id)` (ADR-0001/0002).** Solução definitiva, mas maior escopo.
+  Optou-se por destravar a auto-emissão agora com arquivo+lock e migrar depois.
+- **Lock só in-process (`asyncio.Lock`).** Não cobre webhook×cron (processos distintos). Descartado.
+- **Confiar na numeração de RPS/contador.** O lock do contador garante números distintos, **não**
+  impede duas notas da mesma fatura. Insuficiente.
+
+## Consequências
+
+**Positivas**
+- Fecha a janela de NFS-e duplicada em reentrega da Iugu e em corrida webhook×cron.
+- Elimina os falso-positivos de "já emitida" por flag; corrige a anti-duplicata que estava morta.
+- Cobertura por testes offline (`tests/test_webhook_status.py`): lock ocupado/obsoleto/liberado,
+  cron sob lock, e-mail com anexo — 10/10.
+
+**Limitações / riscos residuais (aceitos)**
+- **Premissa de 1 worker uvicorn + 1 cron.** Com múltiplos workers, migrar para exclusão real
+  (SQLite UNIQUE / flock). Documentado em `_lock_invoice`.
+- **Contador de RPS é por máquina.** Emitir de máquinas diferentes diverge os contadores e o
+  ISSnet rejeita com **E010**. Regra operacional: **emitir apenas pela VPS**.
+- Se a gravação do índice e o fallback falharem juntos (ex.: disco cheio), a Regra 1 fica sem
+  evidência — daí o alerta `logger.error` exigir ação manual.
+
+## Implementação
+
+- `src/nfse_guard.py` (novo): `_LOCK_INVOICE_TTL_SEGUNDOS`, `_lock_invoice`, `_verificar_nfse_duplicada`, `_pid_vivo`.
+- `src/webhook_server.py`: importa do `nfse_guard`; `processar_pagamento` envolve guardrail+emissão+e-mail no lock.
+- `src/scheduled_invoices.py`: `_emitir_nfse_para_fatura` passa a usar o mesmo lock + guardrail.
+- `src/nfse_df.py`: `_gravar_log_nfse` com alerta elevado + fallback de índice mínimo.

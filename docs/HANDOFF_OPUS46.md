@@ -1,6 +1,6 @@
 # HANDOFF — Estado atual do projeto
 
-> **Para o próximo assistente:** ponto de entrada da próxima sessão. Leia na íntegra antes de responder ao Bruno. Atualizado em **05/06/2026**.
+> **Para o próximo assistente:** ponto de entrada da próxima sessão. Leia na íntegra antes de responder ao Bruno. Atualizado em **06/06/2026**.
 
 **Usuário:** Bruno Reis (bruno.reis@grupontsec.com) — admin da conta Iugu da **MEGASUPORTE SERVIÇOS DE TI LTDA** (CNPJ 36.342.291/0001-43, Brasília/DF, Simples Nacional ME/EPP, ambiente "Estabelecido").
 
@@ -10,19 +10,44 @@
 
 Automação que, ao receber webhook de fatura paga da Iugu, emite NFS-e automática no DF, gera boletos recorrentes mensais e tem app/painel de gestão. Hospedado em VPS própria da Hostinger (`iugu.megasuporte.com`, IP `72.62.11.230`).
 
-## 2. Estado atual resumido (05/06/2026)
+## 2. Estado atual resumido (06/06/2026)
 
 | Fase | Status | Observação |
 |------|--------|------------|
 | **Fase 1 — Webhook + cobrança + cadastro Iugu** | ✅ **Validada em produção** | Fluxo "fatura → pago → webhook → atualização" rodando no ar |
-| **Fase 2 — Emissão NFS-e DF** | ✅ **PROVADA EM PRODUÇÃO** | 1ª NFS-e real emitida via integração ABRASF 2.04 em 05/06/2026: **nº 408, código B3B17DA6A** (SINDICONDOMINIO-DF, R$3.150). Fluxo RPS→assinatura→SOAP→ISSnet→NFS-e oficial end-to-end. Emissão ainda **manual** (script); auto-emissão via webhook a ligar |
-| **Fase 3 — Deploy VPS** | ✅ **Concluída** | Backend, painel web, HTTPS, cron e hardening rodando |
+| **Fase 2 — Emissão NFS-e DF** | ✅ **AUTOMÁTICA EM PRODUÇÃO** | Auto-emissão ligada na VPS (`NFSE_PADRAO=abrasf204`). 2 NFS-e reais: **#408** (SINDICONDOMINIO, manual, 05/06) e **MEGATEAM** (R$1, auto pelo painel, 06/06). E-mail automático com XML anexo no ar. Guardrail anti-duplicata blindado |
+| **Fase 3 — Deploy VPS** | ✅ **Concluída** | Backend (commit `909ac61`), painel web, HTTPS, cron e hardening rodando |
 | **Hardening de segurança (OWASP/pentest)** | ✅ Aplicado | CORS restrito, JWT, rate-limit, HSTS, compare_digest, /docs off etc. Detalhes em `docs/pentest_2026-06.md` e `docs/ressalvas_pentest_2026-06.md` |
 | **Arquitetura interna (roadmap)** | 🟡 **Onda 0 + ADR-0003 Etapa 1 deployados** | ADR-0001 (SQLite), ADR-0002 (idempotência), ADR-0003 Etapa 2 e ADR-0004 propostos em `docs/adr/` |
 
-## 3. Última conquista — 1ª NFS-e REAL emitida (#408) via integração
+## 3. Última conquista — EMISSÃO AUTOMÁTICA no ar + e-mail + guardrail blindado (06/06/2026)
 
-✅ **Em 05/06/2026 a integração emitiu a primeira NFS-e real em produção:** nº **408**, código **B3B17DA6A**, para SINDICONDOMINIO-DF (R$ 3.150,00, ISS R$ 63,00), via ABRASF 2.04 / `GerarNfse`. Fluxo completo RPS→assinatura A1→SOAP→ISSnet DF→NFS-e oficial validado end-to-end. Consultável em `https://iss.fazenda.df.gov.br/online/` (nº 408 + código B3B17DA6A).
+✅ **A emissão automática está ligada e provada em produção.** Em 06/06/2026, a fatura de
+teste da **MEGATEAM (R$ 1,00)** foi emitida **automaticamente pelo painel/webhook** via
+ABRASF 2.04 (RPS 2) na VPS, com **e-mail automático** ao tomador (XML anexo + link de
+verificação). Antes disso, em 05/06, a **#408** (SINDICONDOMINIO, R$ 3.150, código
+**B3B17DA6A**) provou o fluxo manual. Os dois confirmam o caminho end-to-end
+RPS→assinatura A1→SOAP→ISSnet DF→NFS-e oficial.
+
+### O que entrou nesta sessão (commits na `main`, deployados na VPS — `909ac61`)
+1. **E-mail automático da NFS-e** (`src/email_nfse.py`): template HTML com logo (CID), tabela
+   (IM/número/código/data/valor), **link oficial de verificação** do DF e XML anexo.
+   Estrutura MIME `multipart/mixed` (corrige sumiço do corpo no Gmail quando há anexo).
+   Disparado tanto no auto-envio (webhook) quanto no "Reenviar NF-e" do painel — template idêntico.
+   Remetente: `financeiro@megasuporte.com`. Logo em `assets/logo_megasuporte.png` (precisa existir na VPS).
+2. **Guardrail anti-duplicata baseado em EVIDÊNCIA** (removidos gatilhos por flag
+   `nf_na_criacao`/custom_variable, que davam falso-positivo): só o log real
+   `nfse_<invoice_id>.json` com `sucesso=true` prova a nota. Corrigida a regra de anti-duplicata
+   por CNPJ+mês+valor que estava **morta** (comparava campos inexistentes).
+3. **`src/nfse_guard.py` (novo)** — módulo neutro com **lock por `invoice_id` (cross-process)**
+   + guardrail, compartilhado por webhook **e** cron. Fecha a janela de NFS-e duplicada em
+   reentrega da Iugu e em corrida webhook×cron (achado ALTO do appsec). TTL 300s + checagem de
+   PID vivo (conservador); fallback de índice mínimo se a gravação do log falhar.
+4. **Testes** (`tests/test_webhook_status.py`): 10/10, incluindo lock ocupado/obsoleto/liberado,
+   cron sob lock e e-mail com anexo. Tudo offline.
+
+> Revisão: cada mudança passou por **squad (web-backend + code-reviewer + appsec)**. O appsec
+> só aprovou após o cron entrar no mesmo lock+guardrail.
 
 Como chegamos aqui: a MEGASUPORTE foi **habilitada em produção** pelo Nota Control (chamado resolvido 05/06/2026). Dois esclarecimentos mudaram o rumo técnico:
 
@@ -50,14 +75,22 @@ Para cobrir os dois mundos, foi criado o **ADR-0005**: arquitetura dual (dispatc
 - Item `01.07` + código municipal `1071` + alíquota `2%` — confirmados (batem com a NFS-e #402 do portal).
 - **RPS série 3:** faixa autorizada **1–50** (liberada 13/01/2023). 1ª nota usou RPS **1**; `.contador_rps.json` em 1 (próximo = 2). ⚠️ **Solicitar mais RPS no portal antes de esgotar os 50.**
 
-## 4. Próximos passos (após a 1ª emissão real)
+## 4. Próximos passos
 
-1. **`ConsultarUrlNfse`** — implementar a operação (extensão ISSnet no WSDL do DF) para obter o **PDF/URL oficial** da NFS-e e entregar ao tomador. Decisão de produto: **não geramos mais PDF próprio** (reportlab removido); usamos o oficial do ISSnet.
-2. **Commit/deploy na VPS** do backend ABRASF + fixes (ainda **não commitado/deployado** — as emissões até agora foram manuais na máquina do Bruno).
-3. **Ligar auto-emissão no webhook:** `NFSE_PADRAO=abrasf204` + `NFSE_AMBIENTE=producao` + `NFSE_DRY_RUN=false` no `.env` da VPS → fatura paga de empresa com `emitir_nf=True` emite NFS-e sozinha. ⚠️ Ligar com consciência (cada pagamento vira documento fiscal real).
-4. **Solicitar mais RPS série 3** no portal antes de esgotar a faixa 1–50.
-5. (Robustez) ler `.contador_rps.json` com `utf-8-sig` (evita o tropeço do BOM que tivemos); limpar mojibake do `retorno.xml` arquivado.
-6. Runbook da emissão manual: `docs/runbook_primeira_emissao_abrasf.md`.
+1. ⚠️ **CONTADOR DE RPS É POR MÁQUINA.** `.contador_rps.json` da VPS ≠ da máquina local. Agora que
+   o automático roda na VPS, **emitir SOMENTE pela VPS** — emitir também localmente faz os
+   contadores divergirem e o ISSnet rejeita com **E010** ("RPS já informado"). Usados até agora:
+   RPS 1 (#408, local) e RPS 2 (MEGATEAM, VPS).
+2. **Solicitar mais RPS série 3** no portal do ISSnet antes de esgotar a faixa **1–50**.
+3. **Confirmar quem emite automático:** revisar quais empresas têm `emitir_nf=True` na Iugu
+   (essas emitem sozinhas no pagamento) e quais têm `nf_na_criacao=True` (emitem no cron).
+4. **`ConsultarUrlNfse`** (PDF oficial) — ainda **diferido** (dava E160 nas tentativas; falta um
+   exemplo real do ISSnet/ACBr para acertar o namespace). Hoje o e-mail vai com **XML anexo +
+   link de verificação** — quando resolvido, anexar também o PDF oficial. Decisão de produto:
+   **não geramos PDF próprio** (reportlab removido).
+5. **Rotação de credenciais** (seção 8) — agora inclui a **senha SMTP** que entrou no `.env` da VPS.
+6. (Robustez) ler `.contador_rps.json`/`.contador_dps.json` com `utf-8-sig` (evita o tropeço do BOM).
+7. Runbook da emissão manual: `docs/runbook_primeira_emissao_abrasf.md`.
 
 ## 5. Documentos a ler antes de mexer em código (ordem)
 
@@ -68,7 +101,7 @@ Para cobrir os dois mundos, foi criado o **ADR-0005**: arquitetura dual (dispatc
 5. `docs/pentest_2026-06.md` + `docs/ressalvas_pentest_2026-06.md` — segurança.
 6. `docs/relatorio-integracao-nfse-df.md` — pesquisa de contexto (ABRASF vs Padrão Nacional, libs, agregadores).
 
-> `README.md` continua **desatualizado** — ignore.
+> `README.md` foi **reescrito em 06/06/2026** — agora é o guia canônico de replicação (arquitetura atual, fonte=Iugu, emissão dual, auto-emissão, e-mail, guardrail, deploy). Pode confiar.
 
 ## 6. Referências oficiais já no projeto
 
@@ -128,11 +161,15 @@ Mantido para diagnóstico se algum desses ressurgir num upgrade futuro da `nfeli
 
 ## 11. Checklist de primeira ação na próxima sessão
 
-1. ✅ Alertar pendências de credenciais (seção 8).
+1. ✅ Alertar pendências de credenciais (seção 8) — inclui **senha SMTP**.
 2. ✅ Confirmar estado real lendo `CLAUDE.md` + `docs/fase2_nfse_df.md` + `docs/adr/README.md`.
-3. ✅ Próximo passo da Fase 2: gerar RPS de exemplo e enviar para `integracao.df@notacontrol.com.br` (seção 4).
+3. ⚠️ Lembrar a regra de ouro do **contador de RPS por máquina**: emitir **só pela VPS** (seção 4).
 4. ✅ Para retomar o roadmap arquitetural: começar pelo **ADR-0001 (SQLite)** — é a fundação dos ADRs 0002/0004.
 
 ---
 
-**Resumo:** Fase 1 e Fase 3 no ar. Fase 2 com os dois backends (nacional + ABRASF) prontos estruturalmente; falta validar 1 RPS com o Nota Control e ajustar constantes específicas do ISSnet DF. Roadmap arquitetural rastreado em `docs/adr/`.
+**Resumo:** Fases 1, 2 e 3 **no ar e em produção**. A emissão de NFS-e DF agora é
+**automática** no pagamento (ABRASF 2.04), com **e-mail automático** ao tomador e
+**guardrail anti-duplicata blindado** (lock por fatura + evidência, ADR-0006). Pendências
+principais: contador de RPS único na VPS, faixa de RPS 1–50, `ConsultarUrlNfse` (PDF oficial,
+diferido) e rotação de credenciais. Roadmap arquitetural em `docs/adr/`.

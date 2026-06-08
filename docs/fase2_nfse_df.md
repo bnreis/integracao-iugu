@@ -3,9 +3,19 @@
 Este documento explica o que foi implementado na Fase 2 e o que falta fazer para
 colocar em produção.
 
-> **Histórico:** documento original escrito em 19/04/2026 para o Padrão Nacional (DPS v1.01). O cabeçalho abaixo reflete o estado real em **05/06/2026**. As seções seguintes ainda descrevem o backend nacional (DPS) e seguem válidas como referência técnica desse caminho.
+> **Histórico:** documento original escrito em 19/04/2026 para o Padrão Nacional (DPS v1.01). As seções abaixo descrevem o backend nacional (DPS) e seguem válidas como referência técnica desse caminho. O estado **mais atual** está sempre em `docs/HANDOFF_OPUS46.md`.
 
-## ✅ Status atual (05/06/2026) — emissor dual pronto; aguardando validação do XML pelo Nota Control
+## 🟢 Status atual (06/06/2026) — AUTO-EMISSÃO EM PRODUÇÃO
+
+A Fase 2 está **no ar e automática**:
+- `NFSE_PADRAO=abrasf204` ligado na VPS → fatura paga de empresa com `emitir_nf=True` emite NFS-e **sozinha** no webhook.
+- Notas reais: **#408** (SINDICONDOMINIO, manual, 05/06) e **MEGATEAM** (R$1, automática pelo painel, 06/06).
+- **E-mail automático** ao tomador (XML anexo + link de verificação do DF) — `src/email_nfse.py`. Mesmo template no auto-envio e no "Reenviar NF-e".
+- **Guardrail anti-duplicata blindado** — `src/nfse_guard.py`: lock por `invoice_id` (cross-process, webhook+cron) + evidência por log real. Ver **ADR-0006**.
+- ⚠️ **Contador de RPS é por máquina** → emitir SÓ pela VPS (faixa série 3 = 1–50; usados RPS 1 e 2).
+- Diferido: `ConsultarUrlNfse` (PDF oficial do ISSnet) — hoje o e-mail vai com XML + link.
+
+## ✅ Status anterior (05/06/2026) — emissor dual pronto; 1ª emissão real
 
 A Fase 2 saiu do bloqueio cadastral e migrou para uma **arquitetura dual** que cobre o presente e o futuro:
 

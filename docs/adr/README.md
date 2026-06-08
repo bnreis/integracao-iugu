@@ -2,8 +2,8 @@
 
 Decisões arquiteturais do projeto **Integração Iugu → NFS-e DF**. Cada ADR
 documenta uma mudança estrutural com contexto, alternativas, consequências, plano
-de migração e impacto. **Status atual: todos `Proposto`** — aguardando aprovação
-do dono do projeto (Bruno) antes de qualquer implementação.
+de migração e impacto. **ADR-0001..0004: `Proposto`** (roadmap). **ADR-0005 e
+ADR-0006: `Aceito`** (implementados e em produção).
 
 ## Índice
 
@@ -11,17 +11,15 @@ do dono do projeto (Bruno) antes de qualquer implementação.
 |-----|--------|--------|---------|
 | [ADR-0001](ADR-0001-persistencia-sqlite.md) | Persistência local em SQLite como fonte da verdade do estado fiscal | Proposto | Sem persistência; correlação invoice→NFS-e por heurística de nome de arquivo |
 | [ADR-0002](ADR-0002-idempotencia-unique-invoice.md) | Idempotência da emissão por `UNIQUE(invoice_id)` | Proposto | Heurística frágil + TOCTOU → risco de NFS-e duplicada e falso bloqueio |
-| [ADR-0003](ADR-0003-customer-id-canonico.md) | `customer_id` como identificador canônico (multi-cliente) | Proposto | **Bug fiscal ativo**: roteamento por CNPJ → NFS-e com config do departamento errado |
+| [ADR-0003](ADR-0003-customer-id-canonico.md) | `customer_id` como identificador canônico (multi-cliente) | Proposto (Etapa 1 em produção) | **Bug fiscal**: roteamento por CNPJ → NFS-e com config do departamento errado |
 | [ADR-0004](ADR-0004-config-negocio-desacoplada-do-notes.md) | Desacoplar a config de negócio do campo `notes` da Iugu | Proposto | N+1 GETs à Iugu + config fiscal acoplada a campo de texto de terceiro |
-| [ADR-0005](ADR-0005-abrasf-2.04-rps.md) | Emissão de NFS-e DF via ABRASF 2.04 (RPS) como caminho de produção de transição | Proposto (condicionado) | Padrão Nacional (DPS) dá HTTP 404 em produção; DF confirmou ABRASF 2.04 (RPS série 3) até 30/06/2026 |
+| [ADR-0005](ADR-0005-abrasf-2.04-rps.md) | Emissão de NFS-e DF via ABRASF 2.04 (RPS) como caminho de produção de transição | **Aceito (em produção)** | Padrão Nacional (DPS) dá HTTP 404 em produção; DF confirmou ABRASF 2.04 (RPS série 3) até 30/06/2026 |
+| [ADR-0006](ADR-0006-guardrail-evidencia-lock-por-fatura.md) | Guardrail anti-duplicata por evidência + lock por fatura (cross-process) | **Aceito (em produção)** | Falso "já emitida" por flag + risco de NFS-e duplicada em reentrega/cron antes de ligar a auto-emissão |
 
-> ⚠️ **ADR-0005 está condicionado à resposta do Nota Control** ao esclarecimento
-> `docs/email_notacontrol_padrao_nacional.md` (canal `integracao.df@notacontrol.com.br`).
-> É o **plano B**: só será executado se a resposta for *"use ABRASF 2.04 até 30/06/2026"*. Se o
-> Nota Control liberar a emissão direta pelo Padrão Nacional (DPS, já implementado), o ADR-0005
-> é descartado (vira `Depreciado`). Diferente dos ADR-0001..0004 (dívida estrutural interna), o
-> ADR-0005 é disparado por um **fato regulatório externo** (habilitação em produção + webservice
-> oficial do DF ser ABRASF 2.04, não o Padrão Nacional).
+> ✅ **ADR-0005 foi confirmado e está em produção** (06/2026): o DF habilitou a MEGASUPORTE e o
+> webservice oficial é **ABRASF 2.04 (RPS série 3)**. A arquitetura dual (`NFSE_PADRAO`) mantém o
+> backend do **Padrão Nacional (DPS v1.01)** pronto para a virada de **30/06/2026** — que vira
+> "trocar 1 variável", não reescrita.
 
 ## Ordem de implementação sugerida (com dependências)
 

@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Fases:**
 - **Fase 1** — webhook Iugu → empresa autorizada → decisão de emissão. ✅ Estável (validada em produção 05/06/2026).
-- **Fase 2** — emissão NFS-e DF via webservice Nota Control. **Arquitetura dual** (ADR-0005): backend nacional DPS v1.01 (`_emitir_nacional`) E backend ABRASF 2.04 RPS (`_emitir_abrasf204`) coexistem em `src/nfse_df.py`, despachados por `NFSE_PADRAO` no `.env`. Os dois validam contra seus XSDs. **Habilitação em produção concluída** (chamado Nota Control 05/06/2026) — produção atual = ABRASF 2.04 (RPS série 3, `df.issnetonline.com.br/webservicenfse204`); a virada para o Padrão Nacional vira "trocar 1 variável" em 30/06/2026. ✅ **1ª NFS-e real emitida em produção (nº 408, código B3B17DA6A) em 05/06/2026** via ABRASF 2.04 — integração provada end-to-end. Emissão ainda **manual** (script); falta: `ConsultarUrlNfse` (PDF oficial), commit/deploy e **ligar a auto-emissão no webhook** (`NFSE_PADRAO=abrasf204` na VPS). Detalhes em `docs/fase2_nfse_df.md` + `docs/adr/ADR-0005-abrasf-2.04-rps.md`.
+- **Fase 2** — emissão NFS-e DF via webservice Nota Control. **Arquitetura dual** (ADR-0005): backend nacional DPS v1.01 (`_emitir_nacional`) E backend ABRASF 2.04 RPS (`_emitir_abrasf204`) coexistem em `src/nfse_df.py`, despachados por `NFSE_PADRAO` no `.env`. Os dois validam contra seus XSDs. **Habilitação em produção concluída** (chamado Nota Control 05/06/2026) — produção atual = ABRASF 2.04 (RPS série 3, `df.issnetonline.com.br/webservicenfse204`); a virada para o Padrão Nacional vira "trocar 1 variável" em 30/06/2026. ✅ **Auto-emissão LIGADA em produção** (06/06/2026): `NFSE_PADRAO=abrasf204` na VPS. Notas reais: **#408** (SINDICONDOMINIO, manual, 05/06) e **MEGATEAM** (R$1, automática pelo painel, 06/06). **E-mail automático** ao tomador (XML anexo + link de verificação) no ar, e **guardrail anti-duplicata blindado** (lock por fatura cross-process + evidência — ADR-0006, `src/nfse_guard.py`). ⚠️ **Contador de RPS é por máquina** → emitir SÓ pela VPS (emitir local diverge e dá E010). Falta (diferido): `ConsultarUrlNfse` (PDF oficial). Detalhes em `docs/fase2_nfse_df.md` + `docs/adr/ADR-0005-abrasf-2.04-rps.md` + `docs/adr/ADR-0006-guardrail-evidencia-lock-por-fatura.md`.
 - **Fase 3** — Deploy na VPS Hostinger (`iugu.megasuporte.com`, IP `72.62.11.230`). ✅ Concluída — backend, painel web, HTTPS, cron e hardening de segurança no ar. ⚠️ VPS compartilhada com produção (Asterisk/PBX + Apache+PHP + MariaDB): não mexer no firewall, no fuso, nem rodar `apt upgrade`; Apache serve de proxy reverso (não instalar nginx).
 
 **Antes de qualquer ação técnica:** confira a auto-memória (carregada automaticamente) — ela contém pendências vivas como rotação de credenciais e bloqueios cadastrais no Nota Control que podem invalidar o caminho "óbvio" sugerido pelo HANDOFF.
@@ -128,8 +128,8 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
                                          Nota Control / iss.fazenda.df.gov.br
                                                  │
                                                  ▼
-                                         src/pdf_nfse.py + src/email_nfse.py
-                                         (DANFSE PDF + entrega ao tomador)
+                                         src/email_nfse.py
+                                         (e-mail ao tomador: XML anexo + link de verificação)
 
 
    Claude Desktop/Code  ──── stdio ────►  mcp_iugu/server.py
@@ -157,8 +157,9 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 | `src/spreadsheet.py` | Legado — só scripts utilitários; xlsx desatualizado | Evitar; não usar como fonte de dados |
 | `src/scheduled_invoices.py` | Estável | Só com bug reproduzível |
 | `mcp_iugu/server.py` | Estável | Só com bug reproduzível |
-| `src/nfse_df.py` | Estável estruturalmente; bloqueios atuais são cadastrais | Sim, se aparecer novo erro de schema |
-| `src/pdf_nfse.py` | Layout em iteração | Sim, sob pedido |
+| `src/nfse_df.py` | Estável em produção (ABRASF 2.04 auto-emissão) | Sim, se aparecer novo erro de schema |
+| `src/nfse_guard.py` | **Estável em produção** (lock + guardrail anti-duplicata, ADR-0006) | Só com bug reproduzível; mexer aqui é risco de NFS-e duplicada |
+| `src/email_nfse.py` | Estável em produção (auto-envio + reenviar) | Sim, sob pedido |
 | `src/config.py` | Adicione campos com Field + default explícito | Sim |
 | `src/api_routes.py`, `src/auth.py` | Em iteração com mobile | Sim |
 
@@ -222,10 +223,10 @@ src/
 ├── auth.py               login + dependency JWT
 ├── iugu_empresas.py      ★ FONTE ATIVA — empresas vêm da Iugu (notes JSON)
 ├── spreadsheet.py        legado (xlsx desatualizado) — só scripts utilitários
-├── scheduled_invoices.py boletos recorrentes mensais
-├── nfse_df.py            emissão NFS-e DF (DPS v1.01 + assinatura + SOAP)
-├── pdf_nfse.py           DANFSE customizado (reportlab + qrcode)
-└── email_nfse.py         envio do PDF + XML ao tomador
+├── scheduled_invoices.py boletos recorrentes mensais (usa nfse_guard no cron)
+├── nfse_guard.py         ★ lock por invoice (cross-process) + guardrail anti-duplicata (ADR-0006)
+├── nfse_df.py            emissão NFS-e DF — dispatcher dual ABRASF 2.04 / DPS v1.01 + assinatura + SOAP
+└── email_nfse.py         e-mail ao tomador (template HTML + logo CID + XML anexo)
 
 mcp_iugu/server.py        MCP para Claude Desktop/Code
 

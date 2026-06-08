@@ -1,302 +1,281 @@
 # Integração Iugu → NFS-e DF
 
-Sistema que, ao receber notificação de pagamento de uma fatura na [Iugu](https://iugu.com), verifica se o CNPJ do pagador está em uma planilha de empresas autorizadas e, se estiver, emite automaticamente uma Nota Fiscal de Serviço Eletrônica (NFS-e) no portal do ISS do Distrito Federal.
+Automação fiscal que, ao receber o webhook de **fatura paga** da [Iugu](https://iugu.com),
+verifica se o cliente está autorizado e **emite automaticamente a NFS-e** no Distrito
+Federal, **envia o XML por e-mail** ao tomador e mantém a **cobrança recorrente** (boletos
+mensais). Inclui **painel web + app mobile** de gestão e um **servidor MCP** da Iugu para o
+Claude.
 
-O projeto também inclui um **servidor MCP (Model Context Protocol)** que permite gerenciar boletos da Iugu diretamente pelo Claude Desktop / Cowork / Claude Code.
-
----
-
-## Visão geral da arquitetura
-
-```
-┌────────────┐   webhook   ┌─────────────────────┐   busca    ┌────────────┐
-│   Iugu     │ ──────────► │  FastAPI Webhook    │ ─────────► │  Planilha  │
-│ (gatilho   │             │   webhook_server.py │            │   Excel    │
-│ invoice    │             │                     │            └────────────┘
-│ paid)      │             │                     │                 │
-└────────────┘             │                     │                 │ CNPJ
-                           │                     │                 │ autorizado?
-                           │                     │                 ▼
-                           │                     │   ┌─────────────────────┐
-                           │                     │──►│   NFS-e DF          │
-                           │                     │   │  (padrão nacional)  │
-                           │                     │   │   nfse_df.py        │
-                           │                     │   └─────────────────────┘
-                           └─────────────────────┘           │
-                                                             ▼
-                                                  ┌──────────────────────┐
-                                                  │ iss.fazenda.df.gov.br│
-                                                  │     webservice       │
-                                                  └──────────────────────┘
-
-                    ┌──────────────────────────────────┐
-                    │  MCP Iugu (mcp_iugu/server.py)   │  ◄───── Claude
-                    │  create/list/get/cancel boletos  │         Desktop/Cowork/Code
-                    └──────────────────────────────────┘
-```
+> **Cliente de referência:** MEGASUPORTE SERVIÇOS DE TI LTDA (Brasília/DF, Simples Nacional
+> ME/EPP). Em produção desde 06/2026 — 1ª NFS-e real emitida pela integração em 05/06/2026.
 
 ---
 
-## Estrutura do projeto
+## ⚡ TL;DR (estado atual)
+
+| Capacidade | Status |
+|---|---|
+| Webhook Iugu → identificação de cliente autorizado | ✅ produção |
+| Emissão NFS-e DF (automática no pagamento) | ✅ produção (ABRASF 2.04) |
+| E-mail automático ao tomador (XML anexo + link de verificação) | ✅ produção |
+| Boletos recorrentes mensais (cron) | ✅ produção |
+| Painel web + app Android (Expo) | ✅ produção / iteração |
+| MCP da Iugu para Claude | ✅ |
+| Guardrail anti-duplicata (evidência + lock por fatura) | ✅ |
+
+**Arquitetura de emissão dual** (ver `docs/adr/ADR-0005`): dois backends coexistem em
+`src/nfse_df.py` e são escolhidos por **uma variável** (`NFSE_PADRAO`):
+- `abrasf204` — **RPS série 3 / ABRASF 2.04** → produção HOJE no DF.
+- `nacional` — **DPS v1.01 / Padrão Nacional** → vira obrigatório em **30/06/2026** (troca de 1 variável).
+
+---
+
+## 🏗 Arquitetura
 
 ```
-Integração Iugo/
-├── README.md                     ← este arquivo
-├── requirements.txt              ← dependências Python
-├── .env.example                  ← modelo de configuração
-├── .gitignore
-├── empresas_autorizadas.xlsx     ← planilha de CNPJs autorizados (já criada)
-│
-├── src/
-│   ├── config.py                 ← carrega .env via Pydantic Settings
-│   ├── iugu_client.py            ← cliente HTTP da API Iugu
-│   ├── spreadsheet.py            ← leitura/escrita da planilha Excel
-│   ├── webhook_server.py         ← FastAPI para receber webhooks
-│   └── nfse_df.py                ← emissão NFS-e (esqueleto FASE 2)
-│
-├── mcp_iugu/
-│   └── server.py                 ← servidor MCP para Claude
-│
-├── scripts/
-│   ├── create_spreadsheet.py     ← gera planilha modelo
-│   └── test_connection.py        ← valida credenciais e conexões
-│
-├── certs/                        ← coloque seu .pfx aqui (não vai pro git)
-└── tests/                        ← (para testes futuros)
+                webhook (invoice.status_changed = paid)
+  Iugu ───────────────────────────────────►  FastAPI (src/webhook_server.py)
+                                                    │
+                                  customer_id → empresa autorizada? (src/iugu_empresas.py)
+                                                    │ sim + emitir_nf=True
+                                                    ▼
+                                      src/nfse_guard.py  ── lock por invoice_id +
+                                                            guardrail anti-duplicata
+                                                    │ livre
+                                                    ▼
+                                      src/nfse_df.py  ── emitir_nfse() despacha por NFSE_PADRAO
+                                          ├── _emitir_abrasf204  (RPS série 3, produção)
+                                          └── _emitir_nacional   (DPS v1.01, pós-30/06)
+                                                    │  assina (A1) + SOAP
+                                                    ▼
+                                      ISSnet DF (df.issnetonline.com.br/webservicenfse204)
+                                                    │ NFS-e nº + código
+                                                    ▼
+                                      src/email_nfse.py  ── e-mail ao tomador
+                                                            (XML anexo + link de verificação)
+
+  Cron (src/scheduled_invoices.py)  ── boletos recorrentes; emite-na-criação para
+                                        empresas nf_na_criacao=True (mesmo lock+guardrail)
+
+  Claude Desktop/Code  ── stdio ──►  mcp_iugu/server.py  (create/list/get/cancel/refund)
+
+  App Android (mobile/, Expo)  ── HTTP+JWT ──►  src/api_routes.py (rotas /api/*, src/auth.py)
+```
+
+**Fonte de dados das empresas = a Iugu (não planilha).** `src/iugu_empresas.py` lê os
+*customers* da Iugu e monta a config fiscal de cada um a partir do campo `notes` (JSON):
+`codigo_servico`, `aliquota_iss`, `emitir_nf`, `nf_na_criacao`, etc. A indexação é por
+**`customer_id`** (chave única) — um mesmo CNPJ pode ter vários customers/departamentos.
+A planilha `empresas_autorizadas.xlsx` é **legada** (só uns scripts utilitários ainda a leem).
+
+---
+
+## 🧱 Stack
+
+- **Backend:** Python 3.13, FastAPI + Uvicorn (1 worker), `pydantic-settings` (`.env`), `httpx`, `loguru`.
+- **NFS-e:** `lxml` (montagem/patches de XML), `erpbrasil.assinatura` (assinatura XMLDSig com certificado **A1 .pfx**), SOAP com mTLS.
+- **E-mail:** `smtplib` + MIME (`multipart/mixed` → `related` com logo CID + anexo XML).
+- **Mobile:** React Native + Expo (pasta `mobile/`), EAS Build.
+- **Infra:** VPS Hostinger (Ubuntu), `systemd`, Apache (proxy reverso) + Let's Encrypt, `cron`.
+
+---
+
+## 📂 Estrutura
+
+```
+src/
+├── config.py             pydantic-settings carrega .env
+├── iugu_client.py        cliente HTTP da Iugu
+├── webhook_server.py     FastAPI: webhooks + monta routers + fluxo de pagamento
+├── api_routes.py         endpoints /api/* (gestão p/ painel e mobile, JWT)
+├── auth.py               login + dependency JWT
+├── iugu_empresas.py      ★ FONTE ATIVA — empresas vêm da Iugu (notes JSON), por customer_id
+├── nfse_guard.py         ★ lock por invoice (cross-process) + guardrail anti-duplicata
+├── nfse_df.py            emissão NFS-e DF — dispatcher dual (ABRASF 2.04 / DPS v1.01)
+├── email_nfse.py         e-mail ao tomador (template HTML + logo + XML anexo)
+├── scheduled_invoices.py boletos recorrentes mensais (cron)
+└── spreadsheet.py        LEGADO (xlsx) — só scripts utilitários
+
+mcp_iugu/server.py        servidor MCP da Iugu para Claude
+mobile/                   app React Native + Expo (Login, Dashboard, Faturas, Empresas)
+scripts/                  utilitários CLI (validação, emissão manual, preview de e-mail, migração)
+tests/test_webhook_status.py   testes offline do fluxo do webhook (guardrail/lock/e-mail)
+docs/                     documentação, ADRs, manuais oficiais, XSD/WSDL/exemplos
+assets/logo_megasuporte.png    logo embutida no e-mail (necessária na VPS p/ o CID)
+certs/*.pfx               certificado A1 (NÃO commitar)
+nfse_emitidas/            XMLs enviados/recebidos + logs nfse_<invoice_id>.json (gitignored)
+.env                      configurações + credenciais (NÃO commitar)
 ```
 
 ---
 
-## Instalação passo a passo
+## 🚀 Como replicar (do zero)
 
-### 1. Requisitos
+### 1. Pré-requisitos
+- Python 3.11+ (projeto roda em 3.13)
+- Conta Iugu com **Live API Token**
+- **Habilitação fiscal no DF** junto ao provedor (ISSnet/Nota Control) + **CF/DF** (a "inscrição municipal" do DF) ativo para emissão em produção
+- **Certificado Digital A1** (`.pfx`) válido
+- (Produção) VPS Linux com domínio + HTTPS
 
-- Python 3.10 ou superior
-- Conta ativa na [Iugu](https://iugu.com) com Live Token da API
-- Inscrição Municipal ativa no DF
-- Certificado Digital A1 (.pfx) válido
-- Usuário e senha do portal [iss.fazenda.df.gov.br](https://iss.fazenda.df.gov.br)
-
-### 2. Criar e ativar o ambiente virtual
-
-**Windows (PowerShell):**
-```powershell
-cd "caminho\para\Integração Iugo"
+### 2. Ambiente
+```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-**Linux / macOS / WSL:**
-```bash
-cd "caminho/para/Integração Iugo"
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### 3. Instalar as dependências
-
-```bash
+# Windows:  .\.venv\Scripts\Activate.ps1
+# Linux:    source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Configurar variáveis de ambiente
+### 3. Configurar `.env`
+Copie `.env.example` → `.env` e preencha (ver tabela abaixo). Coloque o `.pfx` em `certs/`.
 
-Copie o arquivo de exemplo e preencha com suas credenciais:
-
-```bash
-cp .env.example .env
+### 4. Cadastrar empresas **na Iugu** (não na planilha)
+No campo `notes` (JSON) de cada *customer* da Iugu, defina a config fiscal. Mínimo:
+```json
+{"emitir_nf": true, "codigo_servico": "01.07", "aliquota_iss": 2.0, "nf_na_criacao": false}
 ```
+- `emitir_nf: true` → essa empresa emite NFS-e automaticamente quando a fatura é paga.
+- `nf_na_criacao: true` → emite junto com a criação do boleto (cron), não no pagamento.
 
-Edite o `.env` com:
-- Seu **Live Token** da Iugu (obtido em `app.iugu.com` → Administração → Contas → API Tokens)
-- Dados do prestador (CNPJ, Inscrição Municipal, Razão Social)
-- Caminho e senha do certificado digital
-
-### 5. Preencher a planilha de empresas autorizadas
-
-A planilha `empresas_autorizadas.xlsx` já está criada com 2 linhas de exemplo. Abra no Excel/LibreOffice e:
-
-- Mantenha a primeira aba chamada **"Empresas Autorizadas"**
-- **Não altere** os nomes nem a ordem das colunas
-- Para cada empresa, preencha: CNPJ, razão social, e-mail, endereço completo, código de serviço, alíquota ISS
-- Use `ativo = False` para desabilitar sem apagar a linha
-
-Se quiser regenerar a planilha do zero (sem exemplos):
-```bash
-python scripts/create_spreadsheet.py --sem-exemplos
-```
-
-### 6. Validar tudo
-
+### 5. Validar conexões
 ```bash
 python scripts/test_connection.py
 ```
 
-Deve retornar ✅ para Planilha e Iugu. NFS-e DF pode retornar ⚠️ até você preencher o certificado e inscrição municipal.
+### 6. Rodar o webhook localmente
+```bash
+uvicorn src.webhook_server:app --reload --host 0.0.0.0 --port 8000
+# expor p/ a Iugu alcançar (URL muda a cada reinício):
+cloudflared tunnel --url http://localhost:8000
+```
+Na Iugu: **Gatilhos** → evento `invoice.status_changed` → URL
+`https://SEU_HOST/webhook/iugu?token=SEU_IUGU_WEBHOOK_TOKEN`.
 
 ---
 
-## Uso — Servidor de Webhook
+## ⚙️ Variáveis de ambiente principais (`.env`)
 
-### Rodar localmente
+| Variável | Para quê |
+|---|---|
+| `IUGU_API_TOKEN` | Live token da API Iugu |
+| `IUGU_WEBHOOK_TOKEN` | token validado na URL do webhook |
+| `NFSE_AMBIENTE` | `producao` ou `homologacao` |
+| `NFSE_PADRAO` | **`abrasf204`** (hoje) ou `nacional` (pós-30/06/2026) |
+| `NFSE_CERT_PATH` / `NFSE_CERT_SENHA` | caminho e senha do `.pfx` A1 |
+| `NFSE_INSCRICAO_MUNICIPAL` | CF/DF do prestador (ex.: `0796481500161`) |
+| `NFSE_CNPJ_PRESTADOR` | CNPJ do prestador |
+| `NFSE_SERIE_RPS` | série do RPS (DF = `3`) |
+| `NFSE_CNAE` / `NFSE_MUNICIPIO_INCIDENCIA` | exigidos pelo ISSnet DF (`6209100` / `5300108`) |
+| `NFSE_CODIGO_TRIB_MUNICIPAL` / `NFSE_ALIQUOTA_ISS_PADRAO` | tributação (ex.: `1071` / `2.0`) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USAR_TLS` | servidor de e-mail |
+| `SMTP_USUARIO` / `SMTP_SENHA` | credenciais SMTP |
+| `SMTP_REMETENTE_EMAIL` / `SMTP_REMETENTE_NOME` | remetente (ex.: `financeiro@megasuporte.com`) |
+| `API_JWT_SECRET` | segredo do JWT do painel/app |
 
-```bash
-python -m src.webhook_server
-```
-
-Servidor sobe em `http://localhost:8000`.
-
-### Expor publicamente para testes (ngrok)
-
-A Iugu precisa alcançar seu servidor pela internet. Durante o desenvolvimento, use [ngrok](https://ngrok.com):
-
-```bash
-ngrok http 8000
-```
-
-Copie a URL HTTPS que o ngrok gerar (ex: `https://abc123.ngrok-free.app`).
-
-### Configurar o webhook na Iugu
-
-1. Acesse [app.iugu.com](https://app.iugu.com) → **Administração** → **Gatilhos (Webhooks)**
-2. Crie um novo gatilho:
-   - **Evento**: `invoice.status_changed`
-   - **URL**: `https://abc123.ngrok-free.app/webhook/iugu?token=SEU_IUGU_WEBHOOK_TOKEN`
-3. Salve.
-
-### Testar manualmente
-
-Com o servidor rodando, você pode simular o processamento de uma fatura específica:
-
-```bash
-curl -X POST http://localhost:8000/processar/ID_DA_FATURA
-```
-
-### Endpoints disponíveis
-
-| Método | Rota                    | Descrição                                  |
-|--------|-------------------------|---------------------------------------------|
-| GET    | `/health`               | Healthcheck                                 |
-| POST   | `/webhook/iugu`         | Recebe gatilhos da Iugu                     |
-| GET    | `/empresas`             | Lista empresas autorizadas (debug)          |
-| POST   | `/processar/{id}`       | Reprocessa manualmente uma fatura paga      |
+> ⚠️ **Nunca** commite `.env` nem `certs/*.pfx` (já estão no `.gitignore`).
 
 ---
 
-## Uso — MCP da Iugu (no Claude)
+## 🔁 Fluxo de emissão automática (resumo)
 
-O servidor MCP expõe 5 ferramentas ao Claude: `create_boleto`, `list_boletos`, `get_boleto`, `cancel_boleto` e `refund_boleto`.
+1. Iugu envia `invoice.status_changed`; o webhook confirma `status == paid`.
+2. Resolve a empresa por `customer_id`; respeita a flag `emitir_nf`.
+3. **Lock por `invoice_id`** (cross-process) + **guardrail anti-duplicata** (`src/nfse_guard.py`):
+   só um log de emissão **real** (`nfse_<invoice_id>.json` com `sucesso=true`) prova que a
+   nota existe. Evita 2ª nota em reentrega da Iugu ou corrida webhook×cron.
+4. `emitir_nfse()` despacha por `NFSE_PADRAO`, assina com o A1 e envia SOAP ao ISSnet.
+5. Em sucesso: grava o log, devolve número + código e **dispara o e-mail** ao tomador
+   (XML anexo + link oficial de verificação de autenticidade do DF).
 
-### Instalação no Claude Desktop
+**Status HTTP do webhook (WEB-010/011):** falha recuperável → **502** (Iugu re-tenta);
+sucesso, rejeição fiscal ou duplicata → **200** (não re-tenta).
 
-Edite o arquivo de configuração do Claude Desktop:
+---
 
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-
-Adicione:
-
-```json
-{
-  "mcpServers": {
-    "iugu": {
-      "command": "python",
-      "args": ["-m", "mcp_iugu.server"],
-      "cwd": "C:\\caminho\\absoluto\\para\\Integração Iugo",
-      "env": {
-        "IUGU_API_TOKEN": "seu_live_token_aqui"
-      }
-    }
-  }
-}
-```
-
-Reinicie o Claude Desktop. Se tudo estiver certo, você verá "iugu" na lista de servidores MCP conectados e poderá pedir coisas como:
-
-> "Liste os 10 últimos boletos pagos"
-> "Crie um boleto para Empresa XYZ com vencimento em 15/05 no valor de R$ 500"
-> "Cancele o boleto com ID abc-123"
-
-### Instalação no Claude Code
-
-Rode uma vez:
+## 🛠 Comandos comuns
 
 ```bash
-claude mcp add iugu -- python -m mcp_iugu.server
-```
+# Webhook + API
+uvicorn src.webhook_server:app --reload --host 0.0.0.0 --port 8000
 
-Certifique-se de que o `.env` está no diretório onde o Claude Code é executado, ou defina a variável `IUGU_API_TOKEN`.
+# NFS-e DF — validar XML offline
+python scripts/validar_rps_xsd.py            # ABRASF 2.04
+python scripts/validar_dps_xsd.py            # Padrão Nacional
 
-### Testar o MCP localmente (sem Claude)
+# Emissão manual (homologação por padrão; --producao --valor 1.00 --dry-run p/ teste)
+python scripts/emitir_nfse_manual.py <invoice_id>
 
-```bash
+# Pré-visualizar o e-mail da NFS-e (sem enviar)
+python scripts/preview_email_nfse.py
+
+# Enviar e-mail de TESTE para um destinatário arbitrário (usa o template real)
+python scripts/enviar_email_nfse_teste.py --para voce@exemplo.com --xml nfse_emitidas/rps_X_retorno_*.xml
+
+# Boletos recorrentes (cron em produção)
+python scripts/run_scheduled_invoices.py --saida-json logs/lote.json
+
+# Testes (offline; não tocam APIs reais)
+python tests/test_webhook_status.py
+
+# MCP Iugu (standalone)
 python -m mcp_iugu.server
 ```
 
-O servidor fica aguardando mensagens no stdin (protocolo MCP).
+### Mobile (Expo)
+```bash
+cd mobile
+npm start                 # Expo Dev Tools
+npm run android           # roda no Android conectado
+npm run build:apk         # EAS Build (APK preview)
+```
 
 ---
 
-## Roadmap — o que já está pronto vs. o que falta
+## ☁️ Deploy (VPS)
 
-### ✅ Fase 1 — Concluída
-- [x] Estrutura do projeto
-- [x] Cliente Iugu (create/list/get/cancel/refund)
-- [x] Planilha Excel de empresas autorizadas (com aba de instruções)
-- [x] Servidor FastAPI com endpoint de webhook
-- [x] MCP da Iugu para Claude Desktop/Cowork/Code
-- [x] Script de validação de credenciais
+Modelo: **edições locais → `git push` → na VPS `git pull` + `systemctl restart`**.
+Runbook detalhado em `docs/deploy_vps.md`. Resumo:
 
-### ⏳ Fase 2 — NFS-e DF (padrão nacional CGNFS-e)
-- [ ] Baixar XSD e manual oficial em [iss.fazenda.df.gov.br/online](https://iss.fazenda.df.gov.br/online) (aba Downloads)
-- [ ] Implementar `_montar_xml_dps()` seguindo o XSD
-- [ ] Implementar `_assinar_xml()` com `signxml` + certificado A1
-- [ ] Implementar `_enviar_ao_webservice()` (SOAP ou REST)
-- [ ] Parsear resposta (número NFS-e + código verificação)
-- [ ] Gerar PDF (DANFSE) e arquivar XML
-- [ ] Homologar no ambiente de testes do DF
-- [ ] Solicitar manual de homologação em suporte@notaeletronica.com.br
+```bash
+cd /opt/integracao-iugu
+sudo -u iugu git pull
+sudo systemctl restart iugu-webhook    # recarrega .env (NFSE_PADRAO etc.)
+systemctl status iugu-webhook --no-pager
+```
 
-> ⚠️ **Atenção sobre a Reforma Tributária**: desde 01/01/2026 o DF opera no padrão nacional (CGNFS-e), substituindo o ABRASF. Certifique-se de baixar o manual atualizado e usar o XSD do padrão nacional.
-
-### 🚀 Fase 3 — Migração para VPS Hostinger
-- [ ] Provisionar VPS
-- [ ] Configurar serviço systemd para rodar o webhook
-- [ ] Configurar nginx como reverse proxy com HTTPS (Let's Encrypt)
-- [ ] Apontar a URL de webhook oficial na Iugu para o domínio da VPS
-
-### 🚀 Fase 4 — App mobile (opcional, futuro)
-- [ ] Backend: expor API REST (FastAPI) para o app mobile
-- [ ] Autenticação JWT
-- [ ] App em **Flutter** (Android + Wear OS para Galaxy Watch)
-- [ ] Telas: dashboard de faturas, criar boleto rápido, notificações push
+- Serviço `systemd`: `uvicorn src.webhook_server:app --host 127.0.0.1 --port 8000`.
+- **Apache** faz o proxy reverso + HTTPS (Let's Encrypt). VPS **compartilhada** com produção
+  (Asterisk/PBX + Apache/PHP + MariaDB): **não** mexer no firewall, fuso, `apt upgrade`, nem instalar nginx.
+- **Emissões devem sair apenas pela VPS.** O contador de RPS (`.contador_rps.json`) é por
+  máquina — emitir também pela máquina local faz os contadores divergirem e o ISSnet
+  rejeita com **E010** (RPS já informado).
 
 ---
 
-## Segurança
+## 🔒 Segurança
 
-- O `.env` **nunca** deve ser commitado — já está no `.gitignore`
-- Certificado `.pfx` fica em `/certs` — também no `.gitignore`
-- Use sempre **HTTPS** para a URL do webhook (ngrok já faz isso; na VPS, use Let's Encrypt)
-- O `IUGU_WEBHOOK_TOKEN` é uma camada extra de proteção — a Iugu o enviará na URL e validamos antes de processar
-- Ao migrar para VPS, considere usar certificado A3 (com dispositivo físico) ou um HSM
+- `compare_digest` no login + rate-limit; **JWT** obrigatório nas rotas sensíveis; **CORS** restrito; docs do FastAPI desativados em produção; HSTS/X-Frame no Apache.
+- Detalhes e pendências: `docs/pentest_2026-06.md`, `docs/ressalvas_pentest_2026-06.md`, e a seção de pendências do `docs/HANDOFF_OPUS46.md` (rotação de credenciais).
 
 ---
 
-## Links úteis
+## 📚 Documentação
 
-- [Documentação API Iugu](https://dev.iugu.com/reference)
-- [Gatilhos (Webhooks) Iugu](https://dev.iugu.com/docs/gatilhos)
-- [Portal ISS DF](https://iss.fazenda.df.gov.br/)
-- [Portal Nacional NFS-e (padrão CGNFS-e)](https://www.gov.br/nfse/pt-br)
-- [Lista de Serviços DF / LC 116](https://www.fazenda.df.gov.br)
-- [SDK MCP Python](https://github.com/modelcontextprotocol/python-sdk)
-- [FastAPI](https://fastapi.tiangolo.com/)
+| Arquivo | Conteúdo |
+|---|---|
+| `CLAUDE.md` | Guia estável (arquitetura, comandos, armadilhas) para assistentes/devs |
+| `docs/HANDOFF_OPUS46.md` | **Estado atual + próximos passos** (atualizado a cada sessão) |
+| `docs/fase2_nfse_df.md` | Detalhes técnicos da emissão NFS-e DF |
+| `docs/adr/` | Decisões de arquitetura (ADR-0001..0006) |
+| `docs/deploy_vps.md` | Runbook da infra na VPS |
+| `docs/runbook_primeira_emissao_abrasf.md` | Passo a passo da emissão ABRASF |
+| `docs/relatorio-integracao-nfse-df.md` | Pesquisa de contexto (ABRASF × Padrão Nacional, CF/DF) |
 
 ---
 
-## Suporte e dúvidas
+## 🔗 Links úteis
 
-- Suporte Iugu: [suporte.iugu.com](https://suporte.iugu.com)
-- Homologação NFS-e DF: `suporte@notaeletronica.com.br`
-- Reforma tributária / NFS-e DF: acompanhe [economia.df.gov.br](https://www.economia.df.gov.br)
+- [API Iugu](https://dev.iugu.com/reference) · [Gatilhos/Webhooks](https://dev.iugu.com/docs/gatilhos)
+- [Verificação de autenticidade NFS-e DF](https://iss.fazenda.df.gov.br/online/NotaDigital/VerificaAutenticidade.aspx)
+- [ABRASF — NFS-e 2.04](https://abrasf.org.br/biblioteca/arquivos-publicos/nfs-e/versao-2-04)
+- [Portal Nacional NFS-e (CGNFS-e)](https://www.gov.br/nfse/pt-br) · [FastAPI](https://fastapi.tiangolo.com/) · [SDK MCP Python](https://github.com/modelcontextprotocol/python-sdk)
