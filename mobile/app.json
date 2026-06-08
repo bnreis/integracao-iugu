@@ -16,7 +16,8 @@
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#1a56db"
       },
-      "package": "com.megasuporte.iugonfse"
+      "package": "com.megasuporte.iugonfse",
+      "versionCode": 1
     },
     "web": {
       "bundler": "metro",
