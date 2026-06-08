@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, StatusBar, View } from "react-native";
 import { NavigationContainer } from "@react-navigation/native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import LoginScreen from "./screens/LoginScreen";
 import AppNavigator from "./navigation/AppNavigator";
@@ -20,39 +22,40 @@ export default function App() {
       .finally(() => setHidratando(false));
   }, []);
 
+  // Conteúdo conforme o estado (loading / login / app).
+  let content: React.ReactNode;
   if (hidratando) {
-    return (
-      <>
-        <StatusBar barStyle="light-content" backgroundColor="#1a56db" />
-        <View
-          style={{
-            flex: 1,
-            backgroundColor: "#1a56db",
-            justifyContent: "center",
-            alignItems: "center",
-          }}
-        >
-          <ActivityIndicator color="#fff" size="large" />
-        </View>
-      </>
+    content = (
+      <View
+        style={{
+          flex: 1,
+          backgroundColor: "#1a56db",
+          justifyContent: "center",
+          alignItems: "center",
+        }}
+      >
+        <ActivityIndicator color="#fff" size="large" />
+      </View>
     );
-  }
-
-  if (!loggedIn) {
-    return (
-      <>
-        <StatusBar barStyle="light-content" backgroundColor="#1a56db" />
-        <LoginScreen onLoginSuccess={() => setLoggedIn(true)} />
-      </>
-    );
-  }
-
-  return (
-    <>
-      <StatusBar barStyle="light-content" backgroundColor="#1a56db" />
+  } else if (!loggedIn) {
+    content = <LoginScreen onLoginSuccess={() => setLoggedIn(true)} />;
+  } else {
+    content = (
       <NavigationContainer>
         <AppNavigator />
       </NavigationContainer>
-    </>
+    );
+  }
+
+  // GestureHandlerRootView: necessário para o swipe entre abas (gesture-handler).
+  // SafeAreaProvider: expõe os insets (barra de status / barra de navegação do
+  // Android) para o menu inferior não ficar atrás dos botões do celular.
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <StatusBar barStyle="light-content" backgroundColor="#1a56db" />
+        {content}
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
