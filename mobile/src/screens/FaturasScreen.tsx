@@ -21,6 +21,7 @@ import {
   cancelarFatura,
   emitirNfse,
   reenviarNfseEmail,
+  darBaixaManual,
 } from "../services/api";
 import { usePullToRefresh } from "../components/usePullToRefresh";
 import PullIndicator from "../components/PullIndicator";
@@ -57,6 +58,7 @@ function labelMes(ano: number, mes: number): string {
 const STATUS_COLORS: Record<string, string> = {
   pending: "#f59e0b",
   paid: "#059669",
+  externally_paid: "#0d9488",
   canceled: "#6b7280",
   expired: "#dc2626",
   refunded: "#7c3aed",
@@ -66,6 +68,7 @@ const STATUS_COLORS: Record<string, string> = {
 const STATUS_LABELS: Record<string, string> = {
   pending: "Pendente",
   paid: "Paga",
+  externally_paid: "Paga (externa)",
   canceled: "Cancelada",
   expired: "Expirada",
   refunded: "Estornada",
@@ -113,6 +116,10 @@ export default function FaturasScreen() {
   const [detalhe, setDetalhe] = useState<any>(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+
+  // Seletor de baixa manual (modal aninhado)
+  const [baixaSelectVisible, setBaixaSelectVisible] = useState(false);
+  const [baixaInvoiceId, setBaixaInvoiceId] = useState<string | null>(null);
 
   // Helper de confirmação (funciona na web e no mobile)
   const confirmar = (titulo: string, mensagem: string, onConfirm: () => void) => {
@@ -268,6 +275,39 @@ export default function FaturasScreen() {
       },
     );
   };
+
+  const abrirBaixaManual = (id: string) => {
+    setBaixaInvoiceId(id);
+    setBaixaSelectVisible(true);
+  };
+
+  const handleBaixaManual = async (forma: string) => {
+    if (!baixaInvoiceId) return;
+    setBaixaSelectVisible(false);
+    setActionLoading(true);
+    const res = await darBaixaManual(baixaInvoiceId, forma);
+    setActionLoading(false);
+    if (res.data?.sucesso) {
+      if (res.data?.nfse_emitida === true) {
+        alertMsg("Sucesso", res.data.mensagem || "Baixa registrada e NFS-e emitida.");
+      } else {
+        alertMsg(
+          "Baixa registrada — atenção",
+          res.data.mensagem ||
+            res.data.error ||
+            "A baixa foi registrada, mas a NFS-e NÃO foi emitida. Verifique e emita manualmente."
+        );
+      }
+      setBaixaInvoiceId(null);
+      setModalVisible(false);
+      setDetalhe(null);
+      fetchFaturas();
+    } else {
+      alertMsg("Erro", res.data?.error || res.error || "Falha na baixa manual");
+    }
+  };
+
+  const FORMAS_PAGAMENTO = ["Pix na conta", "Dinheiro", "Outros"];
 
   const filtros = [
     { label: "Todas", value: undefined },
@@ -487,8 +527,10 @@ export default function FaturasScreen() {
                       <Text style={styles.actionText}>Reenviar NF-e</Text>
                     </TouchableOpacity>
                   )}
-                  {/* Paga sem NF-e → Gerar */}
-                  {detalhe.status === "paid" && !detalhe.nfse_emitida && (
+                  {/* Paga (Iugu ou baixa externa) sem NF-e → Gerar */}
+                  {(detalhe.status === "paid" ||
+                    detalhe.status === "externally_paid") &&
+                    !detalhe.nfse_emitida && (
                     <TouchableOpacity
                       style={[styles.actionBtn, { backgroundColor: "#7c3aed" }]}
                       onPress={() => handleEmitirNfse(detalhe.id)}
@@ -498,9 +540,17 @@ export default function FaturasScreen() {
                       <Text style={styles.actionText}>Gerar NFS-e</Text>
                     </TouchableOpacity>
                   )}
-                  {/* Pendente → Reenviar cobrança + Cancelar */}
+                  {/* Pendente → Baixa manual + Reenviar cobrança + Cancelar */}
                   {detalhe.status === "pending" && (
                     <>
+                      <TouchableOpacity
+                        style={[styles.actionBtn, { backgroundColor: "#059669" }]}
+                        onPress={() => abrirBaixaManual(detalhe.id)}
+                        disabled={actionLoading}
+                      >
+                        <Ionicons name="cash" size={16} color="#fff" />
+                        <Text style={styles.actionText}>Dar baixa manual</Text>
+                      </TouchableOpacity>
                       <TouchableOpacity
                         style={[styles.actionBtn, { backgroundColor: "#0891b2" }]}
                         onPress={() => handleReenviarEmail(detalhe.id)}
@@ -562,6 +612,40 @@ export default function FaturasScreen() {
                 )}
               </ScrollView>
             ) : null}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal aninhado: seletor de forma de pagamento (baixa manual) */}
+      <Modal visible={baixaSelectVisible} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.baixaSheet}>
+            <Text style={styles.baixaTitle}>Dar baixa manual</Text>
+            <Text style={styles.baixaSubtitle}>
+              Selecione a forma de pagamento recebida
+            </Text>
+            {FORMAS_PAGAMENTO.map((forma) => (
+              <TouchableOpacity
+                key={forma}
+                style={[styles.actionBtn, { backgroundColor: "#059669" }]}
+                onPress={() => handleBaixaManual(forma)}
+                disabled={actionLoading}
+              >
+                <Ionicons name="cash" size={16} color="#fff" />
+                <Text style={styles.actionText}>{forma}</Text>
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              style={[styles.actionBtn, { backgroundColor: "#6b7280" }]}
+              onPress={() => {
+                setBaixaSelectVisible(false);
+                setBaixaInvoiceId(null);
+              }}
+              disabled={actionLoading}
+            >
+              <Ionicons name="close" size={16} color="#fff" />
+              <Text style={styles.actionText}>Cancelar</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -737,6 +821,24 @@ const styles = StyleSheet.create({
   },
   nfseText: { color: "#7c3aed", fontWeight: "500" },
   actions: { flexDirection: "column", gap: 10, marginTop: 20 },
+  // Sheet do seletor de baixa manual
+  baixaSheet: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    gap: 10,
+  },
+  baixaTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    color: "#111827",
+  },
+  baixaSubtitle: {
+    fontSize: 14,
+    color: "#6b7280",
+    marginBottom: 6,
+  },
   actionBtn: {
     flexDirection: "row",
     alignItems: "center",

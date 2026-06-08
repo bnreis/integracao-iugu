@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from contextlib import contextmanager
 from datetime import date
@@ -108,7 +109,12 @@ def _lock_invoice(invoice_id: str):
     obsoleto). Libera no finally apenas se foi quem adquiriu (fecha o fd e remove o
     lockfile, ignorando OSError).
     """
-    lockfile = Path(settings.nfse_output_dir) / f".lock_nfse_{invoice_id}"
+    # Defesa em profundidade: NÃO interpolar o invoice_id cru no nome do arquivo.
+    # Mesmo que a borda (API) já valide o formato, sanitizamos aqui para garantir
+    # que apenas [A-Za-z0-9_-] componha o nome — assim um invoice_id com "../" ou
+    # "/" nunca escapa do diretório nfse_output_dir nem cria um lockfile fora dele.
+    seguro = re.sub(r"[^A-Za-z0-9_-]", "_", invoice_id)
+    lockfile = Path(settings.nfse_output_dir) / f".lock_nfse_{seguro}"
     fd = None
     adquiriu = False
     try:

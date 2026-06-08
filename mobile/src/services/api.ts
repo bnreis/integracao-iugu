@@ -206,6 +206,12 @@ export async function cancelarFatura(id: string) {
   return request("POST", `/api/faturas/${id}/cancel`);
 }
 
+export async function darBaixaManual(invoiceId: string, formaPagamento: string) {
+  return request("POST", `/api/faturas/${invoiceId}/baixa-manual`, {
+    forma_pagamento: formaPagamento,
+  });
+}
+
 // ============================================================
 // NFS-e
 // ============================================================

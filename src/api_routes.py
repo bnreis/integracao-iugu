@@ -8,6 +8,7 @@ Rotas:
   GET  /api/faturas/{id}        -> detalhes de uma fatura
   POST /api/faturas             -> criar fatura manual
   POST /api/faturas/{id}/cancel -> cancelar fatura pendente
+  POST /api/faturas/{id}/baixa-manual -> baixa manual (externally_pay) + auto-emite NFS-e
   GET  /api/nfse                -> listar NFS-e emitidas
   POST /api/nfse/{invoice_id}/emitir   -> emitir/gerar NFS-e
   POST /api/nfse/{invoice_id}/reenviar -> reenviar e-mail da NFS-e
@@ -25,9 +26,11 @@ Dados de negocio ficam como JSON no campo notes do customer.
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from loguru import logger
@@ -63,6 +66,28 @@ api_router = APIRouter(
     tags=["Gestao"],
     dependencies=[Depends(usuario_autenticado)],
 )
+
+
+# ============================================================
+# VALIDACAO DE PATH PARAMS
+# ============================================================
+# Formato do ID de fatura da Iugu: alfanumerico + hifen, ~32 chars (hex do UUID
+# sem tracos, ou variantes). Restringimos a [A-Za-z0-9-]{16,64} para rejeitar
+# logo na borda qualquer valor com "/", "..", espaco ou caractere de controle
+# antes que ele alcance a API da Iugu ou o nome de um lockfile (path traversal).
+_RE_INVOICE_ID = re.compile(r"^[A-Za-z0-9-]{16,64}$")
+
+
+def _validar_invoice_id(invoice_id: str) -> str:
+    """Valida o formato do invoice_id recebido como path param.
+
+    Rejeita com 422 qualquer ID fora do padrao da Iugu. Defesa de borda: impede
+    que valores maliciosos (path traversal, injecao) cheguem ao client da Iugu ou
+    componham caminhos de arquivo. Retorna o proprio ID para uso encadeado.
+    """
+    if not isinstance(invoice_id, str) or not _RE_INVOICE_ID.match(invoice_id):
+        raise HTTPException(422, "invoice_id inválido")
+    return invoice_id
 
 
 # ============================================================
@@ -175,6 +200,11 @@ async def dashboard(
 
     # "Faturado"/"criadas" desconsidera CANCELADAS (boleto cancelado nao e
     # faturamento real, e nao deve entrar na taxa de conversao).
+    # Nota: nao ha checagem explicita de =="paid" no dashboard — as "pagas" vem de
+    # filtros por intervalo de paid_at repassados crus a Iugu (que NAO conhece o
+    # valor "externally_paid" como filtro), entao baixas manuais ja entram nas
+    # pagas via paid_at sem ajuste aqui. O unico filtro de status local e
+    # "!= canceled", que ja trata externally_paid corretamente como nao-cancelada.
     def _nao_cancelada(f):
         return f.get("status") != "canceled"
 
@@ -381,6 +411,7 @@ async def listar_faturas(
 @api_router.get("/faturas/{invoice_id}")
 async def detalhe_fatura(invoice_id: str):
     """Detalhes completos de uma fatura."""
+    _validar_invoice_id(invoice_id)
     try:
         with IuguClient() as client:
             invoice = client.get_invoice(invoice_id)
@@ -498,6 +529,7 @@ async def criar_fatura(req: CriarFaturaRequest):
 @api_router.post("/faturas/{invoice_id}/cancel")
 async def cancelar_fatura(invoice_id: str):
     """Cancela uma fatura pendente."""
+    _validar_invoice_id(invoice_id)
     try:
         with IuguClient() as client:
             result = client.cancel_invoice(invoice_id)
@@ -520,6 +552,140 @@ async def cancelar_fatura(invoice_id: str):
             else f"A Iugu nao cancelou (status atual: {status_final}). "
             "Boletos ja registrados no banco nao podem ser cancelados pela API."
         ),
+    }
+
+
+class BaixaManualRequest(BaseModel):
+    # Literal restringe a forma de pagamento aos 3 valores aceitos; qualquer
+    # outro valor faz o FastAPI rejeitar com 422 antes de chegar na rota.
+    forma_pagamento: Literal["Pix na conta", "Dinheiro", "Outros"] = PydField(
+        ..., description="Forma de pagamento da baixa manual"
+    )
+
+
+@api_router.post("/faturas/{invoice_id}/baixa-manual")
+async def baixa_manual_fatura(invoice_id: str, req: BaixaManualRequest):
+    """Baixa manual: considera a fatura paga externamente (externally_pay) e, no
+    mesmo fluxo, tenta auto-emitir a NFS-e e enviar o e-mail (igual ao pagamento).
+
+    A fatura passa ao status "externally_paid" (sem tarifa Iugu). A emissão segue
+    protegida pelo guardrail/lock de processar_pagamento (evita duplicata).
+    """
+    _validar_invoice_id(invoice_id)
+    forma_pagamento = req.forma_pagamento
+
+    # F1: valida o ESTADO da fatura ANTES de dar baixa. Só faz sentido baixar
+    # manualmente uma fatura pendente ou expirada. Faturas já pagas (paid /
+    # externally_paid), canceladas, estornadas (refunded) ou em chargeback NÃO
+    # podem ser "baixadas" — fazê-lo dispararia uma emissão indevida de NFS-e.
+    try:
+        with IuguClient() as client:
+            invoice = client.get_invoice(invoice_id)
+    except IuguAPIError as e:
+        if e.status_code == 404:
+            raise HTTPException(404, "Fatura nao encontrada")
+        raise HTTPException(502, f"Erro ao buscar fatura: {e.message}")
+
+    status_atual = invoice.get("status")
+    if status_atual not in ("pending", "expired"):
+        raise HTTPException(
+            409,
+            "Só é possível dar baixa manual em fatura pendente ou expirada "
+            f"(status atual: {status_atual}).",
+        )
+
+    # a) ID interno do pagamento externo: uuid hex tem 32 chars (cabe no limite).
+    #    A descrição é a própria forma escolhida (<=50 chars, garantido no client).
+    external_payment_id = uuid.uuid4().hex
+
+    # b) Registra a baixa na Iugu. Se falhar, NÃO seguimos para a emissão.
+    try:
+        with IuguClient() as client:
+            invoice = client.externally_pay(
+                invoice_id, external_payment_id, forma_pagamento
+            )
+    except IuguAPIError as e:
+        # F3: não vazar o detalhe cru da Iugu na resposta. Logamos o erro completo
+        # (status + mensagem) para diagnóstico, mas devolvemos mensagem genérica.
+        logger.error(
+            f"Falha no externally_pay da fatura {invoice_id}: "
+            f"[{e.status_code}] {e.message}"
+        )
+        raise HTTPException(
+            502, "Não foi possível registrar a baixa manual na Iugu. Tente novamente."
+        )
+
+    # F1: confere se a baixa refletiu (espelha o cuidado de cancelar_fatura). Se a
+    # Iugu devolver um status e ele não for externally_paid, alerta (pode não ter
+    # refletido), mas seguimos — a auto-emissão ainda é protegida pelo guardrail.
+    status_iugu = invoice.get("status") or "externally_paid"
+    if invoice.get("status") and invoice.get("status") != "externally_paid":
+        logger.warning(
+            f"Baixa manual da fatura {invoice_id} pode não ter refletido: "
+            f"status Iugu = {status_iugu!r}"
+        )
+
+    # c) Auto-emissão: processar_pagamento re-busca a fatura (agora externally_paid),
+    #    passa no gate e emite + envia o e-mail. Guardrail/lock protegem contra duplicata.
+    from .webhook_server import processar_pagamento
+    resultado = await processar_pagamento(invoice_id)
+
+    # d) Monta a resposta do contrato. A BAIXA deu certo (sucesso=True), mas a NFS-e
+    #    pode ter sido rejeitada/duplicada/ignorada — F4: propagar isso ao contrato
+    #    em vez de fingir sucesso silencioso.
+    acao = resultado.get("acao", "-")
+    nfse_emitida = bool(acao == "nfse_emitida")
+
+    error = None
+    if not nfse_emitida:
+        # Junta as mensagens de rejeição do provedor, se houver, senão usa o error
+        # genérico que processar_pagamento já devolve.
+        nfse_dict = resultado.get("nfse") or {}
+        mensagens = nfse_dict.get("mensagens") if isinstance(nfse_dict, dict) else None
+        if mensagens:
+            error = "; ".join(str(m) for m in mensagens) if isinstance(mensagens, (list, tuple)) else str(mensagens)
+        else:
+            error = resultado.get("error")
+
+    # Mensagem clara por caso de NFS-e.
+    if nfse_emitida:
+        numero = (resultado.get("nfse") or {}).get("numero_nfse") or "?"
+        mensagem = (
+            f"Baixa manual registrada ({forma_pagamento}). NFS-e nº {numero} emitida."
+        )
+    elif acao == "nfse_rejeitada":
+        mensagem = (
+            f"Baixa manual registrada ({forma_pagamento}), mas a NFS-e foi "
+            f"REJEITADA: {error or 'motivo não informado'}."
+        )
+    elif acao == "nfse_duplicada_bloqueada":
+        mensagem = (
+            f"Baixa manual registrada ({forma_pagamento}). NFS-e NÃO emitida: "
+            f"já existe nota para esta fatura ({error or 'duplicata'})."
+        )
+    elif acao == "em_processamento":
+        mensagem = (
+            f"Baixa manual registrada ({forma_pagamento}). NFS-e em processamento "
+            "por outra execução (não emitida agora)."
+        )
+    elif acao == "ignorado":
+        mensagem = (
+            f"Baixa manual registrada ({forma_pagamento}). NFS-e não emitida: "
+            f"{resultado.get('motivo') or 'emissão não aplicável a esta empresa'}."
+        )
+    else:
+        mensagem = (
+            f"Baixa manual registrada ({forma_pagamento}). NFS-e: {acao}"
+            + (f" ({error})" if error else "")
+        )
+
+    return {
+        "sucesso": True,
+        "status": status_iugu,
+        "nfse_emitida": nfse_emitida,
+        "nfse": resultado,
+        "mensagem": mensagem,
+        "error": error,
     }
 
 
@@ -568,6 +734,7 @@ async def listar_nfse(
 @api_router.post("/nfse/{invoice_id}/emitir")
 async def emitir_nfse_endpoint(invoice_id: str):
     """Emite (ou gera em dry-run) a NFS-e para uma fatura."""
+    _validar_invoice_id(invoice_id)
     from .webhook_server import processar_pagamento
     resultado = await processar_pagamento(invoice_id)
     return resultado
@@ -581,6 +748,7 @@ async def reenviar_nfse_email(invoice_id: str):
     - Caso contrario (cobranca/boleto) -> usa o envio nativo da Iugu
       (POST /v1/invoices/{id}/send_email).
     """
+    _validar_invoice_id(invoice_id)
     try:
         with IuguClient() as client:
             invoice = client.get_invoice(invoice_id)

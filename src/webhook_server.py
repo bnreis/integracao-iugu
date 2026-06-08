@@ -204,9 +204,12 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
         logger.error(f"Erro ao buscar fatura {invoice_id}: {e}")
         return {"success": False, "stage": "fetch_invoice", "error": str(e)}
 
-    if invoice.get("status") != "paid":
+    # Aceita pago normal ("paid") OU pago externamente ("externally_paid", baixa
+    # manual). Os dois disparam a emissão da NFS-e; o guardrail/lock evitam duplicata.
+    if invoice.get("status") not in ("paid", "externally_paid"):
         logger.info(
-            f"Fatura {invoice_id} não está paga (status={invoice.get('status')}) — ignorando"
+            f"Fatura {invoice_id} não está paga nem com baixa manual "
+            f"(status={invoice.get('status')}) — ignorando"
         )
         return {
             "success": False,

@@ -71,12 +71,13 @@ def _empresa_mock() -> MagicMock:
     return emp
 
 
-def _rodar_processar_com_emissao(resultado_emissao: dict) -> dict:
+def _rodar_processar_com_emissao(resultado_emissao: dict, status: str = "paid") -> dict:
     """Roda processar_pagamento com toda a cadeia externa mockada e
-    emitir_nfse devolvendo `resultado_emissao`."""
+    emitir_nfse devolvendo `resultado_emissao`. `status` permite simular tanto
+    "paid" quanto "externally_paid" (baixa manual)."""
     # ADR-0003 Etapa 1: a fatura agora carrega customer_id e o webhook resolve a
     # empresa por buscar_por_customer_id (caminho primário), não mais por CNPJ.
-    invoice = {"id": "INV123", "status": "paid", "payer_cpf_cnpj": "12345678000199",
+    invoice = {"id": "INV123", "status": status, "payer_cpf_cnpj": "12345678000199",
                "customer_id": "cust_TESTE", "custom_variables": []}
     empresa = _empresa_mock()
     repo = MagicMock()
@@ -110,6 +111,18 @@ def teste_web011_rejeicao() -> None:
 def teste_emissao_sucesso() -> None:
     print("3) Sucesso de emissão continua 'nfse_emitida':")
     res = _rodar_processar_com_emissao({"sucesso": True, "numero_nfse": "42"})
+    _check("success == True", res.get("success") is True)
+    _check("acao == 'nfse_emitida'", res.get("acao") == "nfse_emitida")
+    _check("HTTP = 200", _status_http_webhook(res) == 200)
+
+
+def teste_gate_externally_paid_emite() -> None:
+    """Baixa manual: fatura com status 'externally_paid' passa no gate de
+    processar_pagamento e emite a NFS-e normalmente (mesmo fluxo do 'paid')."""
+    print("3b) Gate aceita 'externally_paid' (baixa manual) e emite:")
+    res = _rodar_processar_com_emissao(
+        {"sucesso": True, "numero_nfse": "100"}, status="externally_paid"
+    )
     _check("success == True", res.get("success") is True)
     _check("acao == 'nfse_emitida'", res.get("acao") == "nfse_emitida")
     _check("HTTP = 200", _status_http_webhook(res) == 200)
@@ -457,10 +470,40 @@ def teste_cron_sob_lock_ocupado_nao_emite() -> None:
     _check("nfse_erro menciona lock", "lock" in (resultado.nfse_erro or "").lower())
 
 
+def teste_validar_invoice_id() -> None:
+    """F2 — _validar_invoice_id aceita ID no formato da Iugu e rejeita lixo
+    (path traversal, vazio, curto demais). Rejeição vira HTTPException(422)."""
+    print("11) Validação de invoice_id (F2):")
+    from fastapi import HTTPException
+    from src.api_routes import _validar_invoice_id
+
+    # Aceita um ID válido (alfanumérico + hífen, dentro de 16..64 chars).
+    id_valido = "A1B2C3D4E5F60718293A4B5C"
+    ok = False
+    try:
+        ok = _validar_invoice_id(id_valido) == id_valido
+    except HTTPException:
+        ok = False
+    _check("aceita ID válido", ok)
+
+    def _rejeita(valor) -> bool:
+        try:
+            _validar_invoice_id(valor)
+            return False
+        except HTTPException as e:
+            return e.status_code == 422
+
+    _check("rejeita '../x' (path traversal)", _rejeita("../x"))
+    _check("rejeita ID com barra", _rejeita("AAAAAAAAAAAAAAAA/etc"))
+    _check("rejeita vazio", _rejeita(""))
+    _check("rejeita curto demais", _rejeita("ABC123"))
+
+
 if __name__ == "__main__":
     teste_status_http_webhook()
     teste_web011_rejeicao()
     teste_emissao_sucesso()
+    teste_gate_externally_paid_emite()
     teste_auto_envio_email_com_anexo()
     teste_guardrail_regra1_deterministica()
     teste_guardrail_janela_mes()
@@ -468,6 +511,7 @@ if __name__ == "__main__":
     teste_lock_obsoleto_recupera_e_emite()
     teste_lock_liberado_permite_segunda_emissao()
     teste_cron_sob_lock_ocupado_nao_emite()
+    teste_validar_invoice_id()
     print()
     if _falhas:
         print(f"[X] {_falhas} verificacao(oes) FALHARAM")

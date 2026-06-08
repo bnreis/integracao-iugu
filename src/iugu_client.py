@@ -334,6 +334,20 @@ class IuguClient:
         logger.info(f"Estornando fatura {invoice_id}")
         return self._request("POST", f"/v1/invoices/{invoice_id}/refund", json=payload)
 
+    def externally_pay(
+        self,
+        invoice_id: str,
+        external_payment_id: str,
+        external_payment_description: str | None = None,
+    ) -> dict[str, Any]:
+        """Baixa manual: considera a fatura paga externamente (PUT /v1/invoices/{id}/externally_pay).
+        A fatura passa ao status "externally_paid". external_payment_id <=32, description <=50."""
+        payload: dict[str, Any] = {"external_payment_id": external_payment_id}
+        if external_payment_description:
+            payload["external_payment_description"] = external_payment_description[:50]
+        logger.info(f"Baixa manual (externally_pay) da fatura {invoice_id}")
+        return self._request("PUT", f"/v1/invoices/{invoice_id}/externally_pay", json=payload)
+
     def send_invoice_email(self, invoice_id: str) -> dict[str, Any]:
         """Reenvia o e-mail da fatura (boleto/cobranca) ao e-mail vinculado a ela.
         Endpoint nativo da Iugu: POST /v1/invoices/{id}/send_email."""
