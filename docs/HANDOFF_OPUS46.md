@@ -87,7 +87,10 @@ Para cobrir os dois mundos, foi criado o **ADR-0005**: arquitetura dual (dispatc
 4. **`ConsultarUrlNfse`** (PDF oficial) — ainda **diferido** (dava E160 nas tentativas; falta um
    exemplo real do ISSnet/ACBr para acertar o namespace). Hoje o e-mail vai com **XML anexo +
    link de verificação** — quando resolvido, anexar também o PDF oficial. Decisão de produto:
-   **não geramos PDF próprio** (reportlab removido).
+   **não geramos PDF próprio** (reportlab removido). 💡 **Alternativa promissora** (ver
+   `docs/analise_portal_nacional_nfse.md`): quando no Padrão Nacional, puxar o **DANFSe oficial
+   pela API do ADN nacional** (`nfse.gov.br`) — resolve o PDF sem depender da extensão do ISSnet.
+   ⚠️ `nfe.fazenda.gov.br` é NF-e de **mercadorias** — NÃO serve para nossa NFS-e (documento errado).
 5. **Rotação de credenciais** (seção 8) — agora inclui a **senha SMTP** que entrou no `.env` da VPS.
 6. (Robustez) ler `.contador_rps.json`/`.contador_dps.json` com `utf-8-sig` (evita o tropeço do BOM).
 7. Runbook da emissão manual: `docs/runbook_primeira_emissao_abrasf.md`.
