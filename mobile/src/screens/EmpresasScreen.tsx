@@ -342,7 +342,9 @@ export default function EmpresasScreen({ navigation }: any) {
       </View>
 
       <View ref={wrapperRef} style={{ flex: 1 }}>
-        <PullIndicator pull={pull} refreshing={loading} />
+        {/* Só mostra o spinner do pull quando JÁ há dados (refresh). No load
+            inicial (lista vazia) fica só o ActivityIndicator central — evita 2 spinners. */}
+        <PullIndicator pull={pull} refreshing={loading && empresas.length > 0} />
         <FlatList
           data={empresasFiltradas}
           keyExtractor={(item) => item.customer_id || item.cnpj}

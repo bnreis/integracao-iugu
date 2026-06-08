@@ -429,7 +429,9 @@ export default function FaturasScreen() {
 
       {/* Lista */}
       <View ref={wrapperRef} style={{ flex: 1 }}>
-        <PullIndicator pull={pull} refreshing={loading} />
+        {/* Só mostra o spinner do pull quando JÁ há dados (refresh). No load
+            inicial (lista vazia) fica só o ActivityIndicator central — evita 2 spinners. */}
+        <PullIndicator pull={pull} refreshing={loading && faturas.length > 0} />
         <FlatList
           data={faturas}
           keyExtractor={(item) => item.id}
