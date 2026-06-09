@@ -357,9 +357,13 @@ export default function EmpresasScreen({ navigation }: any) {
           }}
           scrollEventThrottle={16}
           refreshControl={
-            // Web usa o PullIndicator custom (acima); evita o 2º spinner.
+            // refreshing só com dados: no load inicial (lista vazia) aparece o
+            // ActivityIndicator central — senão dava 2 spinners no nativo.
             Platform.OS === "web" ? undefined : (
-              <RefreshControl refreshing={loading} onRefresh={fetchEmpresas} />
+              <RefreshControl
+                refreshing={loading && empresas.length > 0}
+                onRefresh={fetchEmpresas}
+              />
             )
           }
           contentContainerStyle={styles.lista}

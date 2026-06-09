@@ -444,10 +444,14 @@ export default function FaturasScreen() {
           }}
           scrollEventThrottle={16}
           refreshControl={
-            // No web o pull-to-refresh é o PullIndicator custom (acima); evita o
-            // 2º spinner do RefreshControl. No nativo, o RefreshControl é o gesto.
+            // No web o pull-to-refresh é o PullIndicator custom (acima); no nativo
+            // é o RefreshControl. refreshing só com dados: no LOAD INICIAL (lista
+            // vazia) quem aparece é o ActivityIndicator central — senão dava 2 spinners.
             Platform.OS === "web" ? undefined : (
-              <RefreshControl refreshing={loading} onRefresh={fetchFaturas} />
+              <RefreshControl
+                refreshing={loading && faturas.length > 0}
+                onRefresh={fetchFaturas}
+              />
             )
           }
           contentContainerStyle={styles.lista}

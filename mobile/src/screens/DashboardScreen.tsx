@@ -327,9 +327,10 @@ export default function DashboardScreen() {
         }}
         scrollEventThrottle={16}
         refreshControl={
-          // Web usa o PullIndicator custom (acima); evita o 2º spinner.
+          // refreshing só quando já há dados (refresh real). O load inicial é
+          // coberto pelo spinner de tela cheia (early return acima).
           Platform.OS === "web" ? undefined : (
-            <RefreshControl refreshing={loading} onRefresh={fetchData} />
+            <RefreshControl refreshing={loading && !!data} onRefresh={fetchData} />
           )
         }
       >
