@@ -142,6 +142,28 @@ def _contar_nfse_periodo(nfse_dir: Path, data_inicio: date, data_fim: date):
     return emitidas, erros
 
 
+def _empresa_emite_nf(repo: Any, fatura: dict) -> bool:
+    """True se a empresa da fatura está marcada para emitir NF-e (emitir_nf=True).
+
+    Resolve a empresa por customer_id (canônico, ADR-0003) com fallback por CNPJ.
+    Sem repo, ou empresa não encontrada → False. Empresa que NÃO emite não deve
+    aparecer como pendente nem com badge "s/ NF-e" (vale p/ emissão manual e no
+    pagamento). Lookups são em cache (get_repo) — baratos por fatura.
+    """
+    if repo is None:
+        return False
+    emp = None
+    cid = fatura.get("customer_id")
+    if cid:
+        emp = repo.buscar_por_customer_id(cid)
+    if emp is None:
+        from .iugu_client import extract_cnpj_from_invoice
+        cnpj = extract_cnpj_from_invoice(fatura)
+        if cnpj:
+            emp = repo.buscar_por_cnpj(cnpj)
+    return bool(emp and emp.emitir_nf)
+
+
 @api_router.get("/dashboard")
 async def dashboard(
     data: Optional[str] = Query(None, description="Data no formato YYYY-MM-DD (default: hoje)"),
@@ -249,24 +271,6 @@ async def dashboard(
     except Exception:
         repo = None
 
-    def _empresa_emite_nf(fatura: dict) -> bool:
-        """True somente se a empresa da fatura está marcada para emitir NF-e
-        (emitir_nf=True no cadastro). Resolve por customer_id (canônico, ADR-0003)
-        com fallback por CNPJ. Empresa não encontrada → NÃO é pendente (evita
-        falso-positivo). Vale para os dois fluxos: emissão manual e no pagamento."""
-        if repo is None:
-            return False
-        emp = None
-        cid = fatura.get("customer_id")
-        if cid:
-            emp = repo.buscar_por_customer_id(cid)
-        if emp is None:
-            from .iugu_client import extract_cnpj_from_invoice
-            cnpj = extract_cnpj_from_invoice(fatura)
-            if cnpj:
-                emp = repo.buscar_por_cnpj(cnpj)
-        return bool(emp and emp.emitir_nf)
-
     for fatura in items_pagas_mes:
         fatura_id = fatura.get("id", "")
         # Evidencia confiavel = log de emissao real (nfse_<invoice_id>.json) por
@@ -276,7 +280,7 @@ async def dashboard(
         tem_nfse = fatura_id in mapa_nfse or any(fatura_id in nome for nome in nfse_arquivos)
         # Só é "pendente de NF-e" se a empresa REALMENTE emite NF-e. Empresa com
         # emitir_nf=False (ex.: MEGATEAM) nunca deve aparecer como pendente.
-        if not tem_nfse and _empresa_emite_nf(fatura):
+        if not tem_nfse and _empresa_emite_nf(repo, fatura):
             nfse_pendentes += 1
             if len(nfse_pendentes_list) < 5:
                 nfse_pendentes_list.append({
@@ -398,6 +402,12 @@ async def listar_faturas(
     mapa_nfse = _carregar_mapa_nfse()
     logger.debug(f"[NFS-e check] Logs locais: {len(mapa_nfse)}")
 
+    # Repo cacheado para checar emitir_nf por fatura (badge "N/A" vs "s/ NF-e").
+    try:
+        repo = get_repo()
+    except Exception:
+        repo = None
+
     def _check_nfse(fatura: dict) -> bool:
         # Detecta NFS-e por EVIDENCIA da propria fatura, nunca pelo flag
         # nf_na_criacao da empresa: o flag diz que a empresa DEVERIA emitir na
@@ -428,6 +438,7 @@ async def listar_faturas(
                 "payer_cpf_cnpj": f.get("payer_cpf_cnpj"),
                 "created_at": f.get("created_at_iso"),
                 "nfse_emitida": _check_nfse(f),
+                "empresa_emite_nf": _empresa_emite_nf(repo, f),
             }
             for f in items
         ],
@@ -452,6 +463,13 @@ async def detalhe_fatura(invoice_id: str):
     # gerando falso-positivo), e nunca usamos o flag nf_na_criacao da empresa.
     nfse_info = _buscar_nfse_da_fatura(invoice_id)
     nfse_emitida = nfse_info is not None
+
+    # Flag emitir_nf da empresa (para o app não exibir "s/ NF-e"/"Gerar" quando a
+    # empresa não emite). Resiliente: se falhar, assume True (não esconde ações).
+    try:
+        empresa_emite_nf = _empresa_emite_nf(get_repo(), invoice)
+    except Exception:
+        empresa_emite_nf = True
 
     bank_slip = invoice.get("bank_slip") or {}
     pix = invoice.get("pix") or {}
@@ -483,6 +501,7 @@ async def detalhe_fatura(invoice_id: str):
         ],
         "nfse": nfse_info,
         "nfse_emitida": nfse_emitida,
+        "empresa_emite_nf": empresa_emite_nf,
     }
 
 

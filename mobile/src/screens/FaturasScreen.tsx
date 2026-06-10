@@ -338,6 +338,12 @@ export default function FaturasScreen() {
               <Ionicons name="checkmark-circle" size={12} color="#059669" />
               <Text style={styles.nfseBadgeText}>NF-e</Text>
             </View>
+          ) : item.empresa_emite_nf === false ? (
+            // Empresa não emite NF-e → badge neutro (não é pendência).
+            <View style={styles.nfseNaBadge}>
+              <Ionicons name="remove-circle" size={12} color="#9ca3af" />
+              <Text style={styles.nfseNaText}>NF-e: N/A</Text>
+            </View>
           ) : (
             <View style={styles.nfsePendenteBadge}>
               <Ionicons name="alert-circle" size={12} color="#f59e0b" />
@@ -546,10 +552,12 @@ export default function FaturasScreen() {
                       <Text style={styles.actionText}>Reenviar NF-e</Text>
                     </TouchableOpacity>
                   )}
-                  {/* Paga (Iugu ou baixa externa) sem NF-e → Gerar */}
+                  {/* Paga (Iugu ou baixa externa) sem NF-e → Gerar.
+                      Só se a empresa emite NF-e (empresa_emite_nf !== false). */}
                   {(detalhe.status === "paid" ||
                     detalhe.status === "externally_paid") &&
-                    !detalhe.nfse_emitida && (
+                    !detalhe.nfse_emitida &&
+                    detalhe.empresa_emite_nf !== false && (
                     <TouchableOpacity
                       style={[styles.actionBtn, { backgroundColor: "#7c3aed" }]}
                       onPress={() => handleEmitirNfse(detalhe.id)}
@@ -768,6 +776,20 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
     color: "#f59e0b",
+  },
+  nfseNaBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    backgroundColor: "#f3f4f6",
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  nfseNaText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#9ca3af",
   },
   faturaName: {
     fontSize: 14,
