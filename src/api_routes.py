@@ -242,6 +242,31 @@ async def dashboard(
     if nfse_dir.exists():
         for f in nfse_dir.glob("dps_*"):
             nfse_arquivos.add(f.name)
+
+    # Repo das empresas (via Iugu, cacheado) — resolvido aqui para checar emitir_nf.
+    try:
+        repo = get_repo()
+    except Exception:
+        repo = None
+
+    def _empresa_emite_nf(fatura: dict) -> bool:
+        """True somente se a empresa da fatura está marcada para emitir NF-e
+        (emitir_nf=True no cadastro). Resolve por customer_id (canônico, ADR-0003)
+        com fallback por CNPJ. Empresa não encontrada → NÃO é pendente (evita
+        falso-positivo). Vale para os dois fluxos: emissão manual e no pagamento."""
+        if repo is None:
+            return False
+        emp = None
+        cid = fatura.get("customer_id")
+        if cid:
+            emp = repo.buscar_por_customer_id(cid)
+        if emp is None:
+            from .iugu_client import extract_cnpj_from_invoice
+            cnpj = extract_cnpj_from_invoice(fatura)
+            if cnpj:
+                emp = repo.buscar_por_cnpj(cnpj)
+        return bool(emp and emp.emitir_nf)
+
     for fatura in items_pagas_mes:
         fatura_id = fatura.get("id", "")
         # Evidencia confiavel = log de emissao real (nfse_<invoice_id>.json) por
@@ -249,7 +274,9 @@ async def dashboard(
         # deteccao: era gravada na criacao do boleto mesmo sem emissao real,
         # gerando falso-positivo em faturas antigas.
         tem_nfse = fatura_id in mapa_nfse or any(fatura_id in nome for nome in nfse_arquivos)
-        if not tem_nfse:
+        # Só é "pendente de NF-e" se a empresa REALMENTE emite NF-e. Empresa com
+        # emitir_nf=False (ex.: MEGATEAM) nunca deve aparecer como pendente.
+        if not tem_nfse and _empresa_emite_nf(fatura):
             nfse_pendentes += 1
             if len(nfse_pendentes_list) < 5:
                 nfse_pendentes_list.append({
@@ -259,10 +286,9 @@ async def dashboard(
                     "paid_at": fatura.get("paid_at"),
                 })
 
-    # Empresas ativas (agora via Iugu)
+    # Empresas ativas (reaproveita o repo já resolvido acima)
     try:
-        repo = get_repo()
-        total_empresas = len(repo.listar_ativas())
+        total_empresas = len(repo.listar_ativas()) if repo else 0
     except Exception:
         total_empresas = 0
 
