@@ -209,14 +209,6 @@ async def dashboard(
                 created_at_from=data_corte_iso,
                 limit=100,
             )
-
-            ontem = data_ref - timedelta(days=1)
-            vencidas = client.list_invoices(
-                status="pending",
-                due_date_to=f"{ontem}",
-                created_at_from=data_corte_iso,
-                limit=100,
-            )
     except IuguAPIError as e:
         raise HTTPException(502, f"Erro ao consultar Iugu: {e.message}")
 
@@ -235,7 +227,19 @@ async def dashboard(
     items_criadas_mes = [f for f in criadas_mes.get("items", []) if _nao_cancelada(f)]
     items_pagas_mes = pagas_mes.get("items", [])
     items_pendentes = pendentes.get("items", [])
-    items_vencidas = vencidas.get("items", [])
+
+    # VENCIDA = fatura pendente cuja DATA DE VENCIMENTO REAL (da fatura gerada, não
+    # do cadastro) JÁ PASSOU. Regra: due_date < hoje — vencimento no PRÓPRIO dia
+    # ainda está no prazo (não é pendência). Calculado por fatura, então reflete
+    # corretamente faturas reemitidas com nova data de vencimento.
+    def _esta_vencida(f: dict) -> bool:
+        dd = str(f.get("due_date") or "")[:10]
+        try:
+            return date.fromisoformat(dd) < data_ref
+        except ValueError:
+            return False
+
+    items_vencidas = [f for f in items_pendentes if _esta_vencida(f)]
 
     def soma_cents(items, campo="total_cents"):
         return sum(int(f.get(campo) or f.get("total_cents") or 0) for f in items)
@@ -330,7 +334,7 @@ async def dashboard(
         "pendencias": {
             "faturas_pendentes": pendentes.get("totalItems", len(items_pendentes)),
             "valor_pendente": format_cents_to_br(total_pendente),
-            "faturas_vencidas": vencidas.get("totalItems", len(items_vencidas)),
+            "faturas_vencidas": len(items_vencidas),
             "valor_vencido": format_cents_to_br(total_vencido),
             "nfse_pendentes": nfse_pendentes,
             "top_vencidas": top_vencidas,

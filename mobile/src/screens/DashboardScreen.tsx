@@ -466,9 +466,11 @@ export default function DashboardScreen() {
             </View>
           </View>
 
-          {/* ── SEÇÃO: PENDÊNCIAS ── */}
+          {/* ── SEÇÃO: PENDÊNCIAS ──
+              Só é "ação necessária" o que de fato exige ação: fatura VENCIDA
+              (due_date < hoje, não paga) ou NFS-e pendente. Faturas pendentes com
+              vencimento FUTURO não entram aqui (são apenas "A receber"). */}
           {(data.pendencias.faturas_vencidas > 0 ||
-            data.pendencias.faturas_pendentes > 0 ||
             data.pendencias.nfse_pendentes > 0) && (
             <>
               <View style={styles.sectionHeader}>
