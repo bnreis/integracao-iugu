@@ -20,6 +20,7 @@ import {
   getFatura,
   cancelarFatura,
   emitirNfse,
+  emitirNfseManual,
   reenviarNfseEmail,
   darBaixaManual,
 } from "../services/api";
@@ -248,6 +249,27 @@ export default function FaturasScreen() {
         setActionLoading(false);
         if (res.data?.success) {
           alertMsg("Sucesso", "Nota Fiscal emitida e enviada com sucesso!");
+        } else {
+          alertMsg("Erro", "Não foi possível emitir a Nota Fiscal para esta fatura.");
+        }
+      },
+    );
+  };
+
+  // Emissão MANUAL: gera a NFS-e mesmo com a fatura ainda NÃO paga.
+  const handleEmitirNfseManual = (id: string) => {
+    confirmar(
+      "Gerar NFS-e (manual)",
+      "Esta fatura ainda NÃO foi paga. Deseja emitir a Nota Fiscal mesmo assim?",
+      async () => {
+        setActionLoading(true);
+        const res = await emitirNfseManual(id);
+        setActionLoading(false);
+        if (res.data?.success) {
+          alertMsg("Sucesso", "Nota Fiscal emitida e enviada com sucesso!");
+          setModalVisible(false);
+          setDetalhe(null);
+          fetchFaturas();
         } else {
           alertMsg("Erro", "Não foi possível emitir a Nota Fiscal para esta fatura.");
         }
@@ -567,7 +589,7 @@ export default function FaturasScreen() {
                       <Text style={styles.actionText}>Gerar NFS-e</Text>
                     </TouchableOpacity>
                   )}
-                  {/* Pendente → Baixa manual + Reenviar cobrança + Cancelar */}
+                  {/* Pendente → Baixa manual + Gerar NFS-e (manual) + Reenviar + Cancelar */}
                   {detalhe.status === "pending" && (
                     <>
                       <TouchableOpacity
@@ -578,6 +600,17 @@ export default function FaturasScreen() {
                         <Ionicons name="cash" size={16} color="#fff" />
                         <Text style={styles.actionText}>Dar baixa manual</Text>
                       </TouchableOpacity>
+                      {/* Emissão MANUAL da NFS-e mesmo sem pagamento (empresa que emite). */}
+                      {detalhe.empresa_emite_nf !== false && !detalhe.nfse_emitida && (
+                        <TouchableOpacity
+                          style={[styles.actionBtn, { backgroundColor: "#7c3aed" }]}
+                          onPress={() => handleEmitirNfseManual(detalhe.id)}
+                          disabled={actionLoading}
+                        >
+                          <Ionicons name="receipt" size={16} color="#fff" />
+                          <Text style={styles.actionText}>Gerar NFS-e (manual)</Text>
+                        </TouchableOpacity>
+                      )}
                       <TouchableOpacity
                         style={[styles.actionBtn, { backgroundColor: "#0891b2" }]}
                         onPress={() => handleReenviarEmail(detalhe.id)}

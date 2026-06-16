@@ -10,7 +10,8 @@ Rotas:
   POST /api/faturas/{id}/cancel -> cancelar fatura pendente
   POST /api/faturas/{id}/baixa-manual -> baixa manual (externally_pay) + auto-emite NFS-e
   GET  /api/nfse                -> listar NFS-e emitidas
-  POST /api/nfse/{invoice_id}/emitir   -> emitir/gerar NFS-e
+  POST /api/nfse/{invoice_id}/emitir   -> emitir/gerar NFS-e (fatura paga/baixa)
+  POST /api/nfse/{invoice_id}/emitir-manual -> emitir mesmo com fatura nao paga (manual)
   POST /api/nfse/{invoice_id}/reenviar -> reenviar e-mail da NFS-e
   POST /api/empresas            -> cadastrar nova empresa
   GET  /api/empresas            -> listar empresas
@@ -782,10 +783,23 @@ async def listar_nfse(
 
 @api_router.post("/nfse/{invoice_id}/emitir")
 async def emitir_nfse_endpoint(invoice_id: str):
-    """Emite (ou gera em dry-run) a NFS-e para uma fatura."""
+    """Emite (ou gera em dry-run) a NFS-e para uma fatura PAGA (ou baixa manual)."""
     _validar_invoice_id(invoice_id)
     from .webhook_server import processar_pagamento
     resultado = await processar_pagamento(invoice_id)
+    return resultado
+
+
+@api_router.post("/nfse/{invoice_id}/emitir-manual")
+async def emitir_nfse_manual_endpoint(invoice_id: str):
+    """Emissão MANUAL: gera a NFS-e mesmo se a fatura ainda NÃO foi paga.
+
+    Decisão do operador pelo painel. Pula só o gate de "fatura paga"; mantém
+    empresa autorizada, emitir_nf, lock e guardrail anti-duplicata (forcar_emissao).
+    """
+    _validar_invoice_id(invoice_id)
+    from .webhook_server import processar_pagamento
+    resultado = await processar_pagamento(invoice_id, forcar_emissao=True)
     return resultado
 
 

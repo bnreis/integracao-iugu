@@ -191,10 +191,17 @@ async def processar_manualmente(invoice_id: str):
 # ============================================================
 # Lógica central
 # ============================================================
-async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
+async def processar_pagamento(
+    invoice_id: str, forcar_emissao: bool = False
+) -> dict[str, Any]:
     """
     Fluxo central: busca a fatura, valida o CNPJ contra o cadastro Iugu
     e aciona a emissão de NFS-e se autorizado.
+
+    forcar_emissao=True (emissão MANUAL pelo painel): pula apenas o gate de
+    "fatura paga", permitindo emitir NFS-e de uma fatura ainda PENDENTE. Todo o
+    resto (empresa autorizada, emitir_nf, lock e guardrail anti-duplicata) continua
+    valendo. Usado pelo botão "Gerar NFS-e" em fatura pendente.
     """
     # 1. Busca detalhes da fatura na Iugu
     try:
@@ -206,7 +213,9 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
 
     # Aceita pago normal ("paid") OU pago externamente ("externally_paid", baixa
     # manual). Os dois disparam a emissão da NFS-e; o guardrail/lock evitam duplicata.
-    if invoice.get("status") not in ("paid", "externally_paid"):
+    # forcar_emissao=True (emissão manual pelo painel) ignora esse gate — permite
+    # emitir mesmo com a fatura PENDENTE (decisão do operador).
+    if not forcar_emissao and invoice.get("status") not in ("paid", "externally_paid"):
         logger.info(
             f"Fatura {invoice_id} não está paga nem com baixa manual "
             f"(status={invoice.get('status')}) — ignorando"
@@ -216,6 +225,11 @@ async def processar_pagamento(invoice_id: str) -> dict[str, Any]:
             "stage": "check_status",
             "reason": f"status={invoice.get('status')}",
         }
+    if forcar_emissao and invoice.get("status") not in ("paid", "externally_paid"):
+        logger.warning(
+            f"⚠️ Emissão MANUAL forçada para fatura {invoice_id} ainda não paga "
+            f"(status={invoice.get('status')}) — solicitada pelo painel"
+        )
 
     # 2. Extrai CNPJ
     cnpj = extract_cnpj_from_invoice(invoice)

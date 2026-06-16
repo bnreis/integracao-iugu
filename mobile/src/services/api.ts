@@ -224,6 +224,11 @@ export async function emitirNfse(invoiceId: string) {
   return request("POST", `/api/nfse/${invoiceId}/emitir`);
 }
 
+// Emissão MANUAL: gera a NFS-e mesmo com a fatura ainda NÃO paga (decisão do operador).
+export async function emitirNfseManual(invoiceId: string) {
+  return request("POST", `/api/nfse/${invoiceId}/emitir-manual`);
+}
+
 export async function reenviarNfseEmail(invoiceId: string) {
   return request("POST", `/api/nfse/${invoiceId}/reenviar`);
 }
