@@ -94,6 +94,9 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
   const [issRetido, setIssRetido] = useState(
     isEditMode ? !!empresaParam.iss_retido : false
   );
+  const [inscricaoMunicipal, setInscricaoMunicipal] = useState(
+    isEditMode ? empresaParam.inscricao_municipal || "" : ""
+  );
   const [ativa, setAtiva] = useState(
     isEditMode ? empresaParam.ativo !== false : true
   );
@@ -167,6 +170,7 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
         emitir_nf: emitirNf,
         nf_na_criacao: nfNaCriacao,
         iss_retido: issRetido,
+        inscricao_municipal: inscricaoMunicipal.trim(),
         ativo: ativa,
         // Endereco
         zip_code: zipCode.replace(/\D/g, ""),
@@ -204,6 +208,7 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
         emitir_nf: emitirNf,
         nf_na_criacao: nfNaCriacao,
         iss_retido: issRetido,
+        inscricao_municipal: inscricaoMunicipal.trim(),
         // Endereco
         zip_code: zipCode.replace(/\D/g, ""),
         street: street.trim(),
@@ -412,6 +417,15 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
         <Text style={[styles.sectionTitle, { marginTop: 20 }]}>
           Configuracoes
         </Text>
+
+        <Text style={styles.label}>Inscricao Municipal (tomador)</Text>
+        <TextInput
+          style={styles.input}
+          placeholder="Obrigatoria quando ISS retido na fonte"
+          value={inscricaoMunicipal}
+          onChangeText={setInscricaoMunicipal}
+          keyboardType="number-pad"
+        />
 
         <View style={styles.toggleRow}>
           <Text style={styles.toggleLabel}>Emitir NF-e</Text>

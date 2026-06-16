@@ -861,6 +861,7 @@ class CriarEmpresaRequest(BaseModel):
     emitir_nf: bool = PydField(True, description="Emitir NF-e automaticamente")
     nf_na_criacao: bool = PydField(False, description="Emitir NF-e junto com o boleto")
     iss_retido: bool = PydField(False, description="ISS retido na fonte (substituto tributario)")
+    inscricao_municipal: str = PydField("", description="Inscricao Municipal do tomador (exigida na retencao)")
     descricao_boleto: str = PydField("", description="Descricao no boleto")
     valor_fatura: str = PydField("", description="Valor da fatura em formato BR (ex: 1850,00)")
     dia_criacao_fatura: int = PydField(0, ge=0, le=31, description="Dia do mes para cobranca recorrente (0=sem)")
@@ -899,6 +900,7 @@ async def cadastrar_empresa(req: CriarEmpresaRequest):
         emitir_nf=req.emitir_nf,
         nf_na_criacao=req.nf_na_criacao,
         iss_retido=req.iss_retido,
+        inscricao_municipal=req.inscricao_municipal,
         descricao_boleto=req.descricao_boleto,
         valor_fatura=req.valor_fatura,
         dia_criacao_fatura=req.dia_criacao_fatura,
@@ -961,6 +963,7 @@ async def listar_empresas(
                 "emitir_nf": e.emitir_nf,
                 "nf_na_criacao": e.nf_na_criacao,
                 "iss_retido": e.iss_retido,
+                "inscricao_municipal": e.inscricao_municipal,
                 "descricao_boleto": e.descricao_boleto,
                 "valor_fatura": e.valor_fatura,
                 "dia_criacao_fatura": e.dia_criacao_fatura,
@@ -1003,6 +1006,7 @@ class EditarEmpresaRequest(BaseModel):
     emitir_nf: Optional[bool] = None
     nf_na_criacao: Optional[bool] = None
     iss_retido: Optional[bool] = None
+    inscricao_municipal: Optional[str] = None
     descricao_boleto: Optional[str] = None
     valor_fatura: Optional[str] = None
     dia_criacao_fatura: Optional[int] = None
@@ -1048,8 +1052,8 @@ async def editar_empresa(cnpj: str, req: EditarEmpresaRequest):
     # Campos de negocio: ler notes JSON existente, fazer merge, regravar
     campos_negocio = [
         "codigo_servico", "descricao_servico", "aliquota_iss",
-        "emitir_nf", "nf_na_criacao", "iss_retido", "descricao_boleto",
-        "valor_fatura", "dia_criacao_fatura", "ativo", "observacoes",
+        "emitir_nf", "nf_na_criacao", "iss_retido", "inscricao_municipal",
+        "descricao_boleto", "valor_fatura", "dia_criacao_fatura", "ativo", "observacoes",
     ]
     tem_campo_negocio = any(c in dados for c in campos_negocio)
 

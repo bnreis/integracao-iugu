@@ -60,6 +60,7 @@ class Empresa:
     emitir_nf: bool = True
     nf_na_criacao: bool = False
     iss_retido: bool = False        # tomador substituto tributário → ISSRetido=1
+    inscricao_municipal: str = ""   # IM do tomador (exigida na retenção: E039/L006)
     descricao_boleto: str = ""
     valor_fatura: str = ""          # formato BR: "1850,00"
     dia_criacao_fatura: int = 0     # 1-31 (0 = desabilitado)
@@ -82,7 +83,7 @@ class Empresa:
     _COLUNAS_LEGADO = [
         "cnpj", "razao_social", "email",
         "codigo_servico", "descricao_servico", "aliquota_iss",
-        "emitir_nf", "nf_na_criacao", "iss_retido",
+        "emitir_nf", "nf_na_criacao", "iss_retido", "inscricao_municipal",
         "descricao_boleto", "valor_fatura", "dia_criacao_fatura",
         "observacoes", "ativo",
     ]
@@ -188,6 +189,7 @@ def empresa_para_notes_json(emp: Empresa) -> str:
         "emitir_nf": bool(emp.emitir_nf),
         "nf_na_criacao": bool(emp.nf_na_criacao),
         "iss_retido": bool(emp.iss_retido),
+        "inscricao_municipal": str(emp.inscricao_municipal or ""),
         "descricao_boleto": str(emp.descricao_boleto or ""),
         "valor_fatura": str(emp.valor_fatura or ""),
         "dia_criacao_fatura": int(emp.dia_criacao_fatura),
@@ -246,6 +248,7 @@ def customer_para_empresa(customer: dict[str, Any]) -> Empresa | None:
         emitir_nf=_bool(dados.get("emitir_nf"), padrao=True),
         nf_na_criacao=_bool(dados.get("nf_na_criacao"), padrao=False),
         iss_retido=_bool(dados.get("iss_retido"), padrao=False),
+        inscricao_municipal=str(dados.get("inscricao_municipal", "") or ""),
         descricao_boleto=str(dados.get("descricao_boleto", "")),
         valor_fatura=str(dados.get("valor_fatura", "")),
         dia_criacao_fatura=dia,

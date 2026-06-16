@@ -540,7 +540,14 @@ def _montar_xml_rps_abrasf(
     # IssRetido (tsSimNao): 1 = Retido na fonte pelo tomador (substituto tributário,
     # ex.: FIPECQ — exigido pelo ISSnet, erro L060), 2 = Não retido. Vem da flag
     # iss_retido da empresa (cadastro).
-    _el(serv, "IssRetido", "1" if getattr(empresa, "iss_retido", False) else "2")
+    iss_retido_flag = getattr(empresa, "iss_retido", False)
+    _el(serv, "IssRetido", "1" if iss_retido_flag else "2")
+    # ResponsavelRetencao (tsResponsavelRetencao): 1=Tomador, 2=Intermediário.
+    # Obrigatório quando há retenção (ISSnet: erro E280 sem ele). Ordem do XSD:
+    # logo APÓS IssRetido e ANTES de ItemListaServico. Aqui o responsável é o
+    # próprio tomador (substituto tributário, ex.: FIPECQ).
+    if iss_retido_flag:
+        _el(serv, "ResponsavelRetencao", "1")  # 1 = Tomador
     # ItemListaServico (tsItemListaServico): subitem LC 116/2003 no formato "NN.NN".
     _el(serv, "ItemListaServico", _formatar_item_lista_servico(servico.codigo_servico))
     # CodigoCnae (tsCodigoCnae = xsd:int, totalDigits=7): obrigatório no ISSnet DF
@@ -578,6 +585,12 @@ def _montar_xml_rps_abrasf(
             _el(cpfcnpj_toma, "Cpf", cnpj_tomador)
         else:
             _el(cpfcnpj_toma, "Cnpj", cnpj_tomador.zfill(14)[:14])
+        # InscricaoMunicipal do TOMADOR (após CpfCnpj, na ordem do XSD). Necessária
+        # quando o tomador é substituto tributário e retém o ISS — sem ela o ISSnet
+        # rejeita com E039/L006 ("tomador não encontrado / IM não informada").
+        im_tomador = _so_digitos(getattr(empresa, "inscricao_municipal", "") or "")
+        if im_tomador:
+            _el(ident_toma, "InscricaoMunicipal", im_tomador[:15])
     _el(toma, "RazaoSocial", (empresa.razao_social or "TOMADOR")[:150])
     # Endereco (tcEndereco) — todos os filhos obrigatórios exceto Complemento;
     # só monta se houver dados mínimos (logradouro+cidade+CEP) para não enviar lixo.
