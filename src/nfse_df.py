@@ -537,8 +537,10 @@ def _montar_xml_rps_abrasf(
     # Aliquota (tsAliquota = decimal totalDigits=4, fractionDigits=2): percentual,
     # ex.: 2.00 para 2%. ⚠️ NÃO é fração (0.02) — confirmado pelo XSD (máx 99.99).
     _el(valores, "Aliquota", f"{servico.aliquota_iss:.2f}")
-    # IssRetido (tsSimNao): 2 = Não retido (tomador não retém ISS).
-    _el(serv, "IssRetido", "2")
+    # IssRetido (tsSimNao): 1 = Retido na fonte pelo tomador (substituto tributário,
+    # ex.: FIPECQ — exigido pelo ISSnet, erro L060), 2 = Não retido. Vem da flag
+    # iss_retido da empresa (cadastro).
+    _el(serv, "IssRetido", "1" if getattr(empresa, "iss_retido", False) else "2")
     # ItemListaServico (tsItemListaServico): subitem LC 116/2003 no formato "NN.NN".
     _el(serv, "ItemListaServico", _formatar_item_lista_servico(servico.codigo_servico))
     # CodigoCnae (tsCodigoCnae = xsd:int, totalDigits=7): obrigatório no ISSnet DF

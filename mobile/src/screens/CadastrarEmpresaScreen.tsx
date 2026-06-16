@@ -91,6 +91,9 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
   const [nfNaCriacao, setNfNaCriacao] = useState(
     isEditMode ? !!empresaParam.nf_na_criacao : false
   );
+  const [issRetido, setIssRetido] = useState(
+    isEditMode ? !!empresaParam.iss_retido : false
+  );
   const [ativa, setAtiva] = useState(
     isEditMode ? empresaParam.ativo !== false : true
   );
@@ -163,6 +166,7 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
         observacoes: observacoes.trim(),
         emitir_nf: emitirNf,
         nf_na_criacao: nfNaCriacao,
+        iss_retido: issRetido,
         ativo: ativa,
         // Endereco
         zip_code: zipCode.replace(/\D/g, ""),
@@ -199,6 +203,7 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
         observacoes: observacoes.trim(),
         emitir_nf: emitirNf,
         nf_na_criacao: nfNaCriacao,
+        iss_retido: issRetido,
         // Endereco
         zip_code: zipCode.replace(/\D/g, ""),
         street: street.trim(),
@@ -425,6 +430,16 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
             onValueChange={setNfNaCriacao}
             trackColor={{ false: "#d1d5db", true: "#93c5fd" }}
             thumbColor={nfNaCriacao ? "#1a56db" : "#f4f3f4"}
+          />
+        </View>
+
+        <View style={styles.toggleRow}>
+          <Text style={styles.toggleLabel}>ISS retido na fonte</Text>
+          <Switch
+            value={issRetido}
+            onValueChange={setIssRetido}
+            trackColor={{ false: "#d1d5db", true: "#93c5fd" }}
+            thumbColor={issRetido ? "#1a56db" : "#f4f3f4"}
           />
         </View>
 
