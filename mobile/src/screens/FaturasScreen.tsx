@@ -29,6 +29,51 @@ import { usePullToRefresh } from "../components/usePullToRefresh";
 import PullIndicator from "../components/PullIndicator";
 
 // ============================================================
+// Mensagem amigável de falha de emissão (processar_pagamento)
+// Traduz o "acao" do backend para algo claro ao operador.
+// ============================================================
+function falhaEmissao(res: any): { titulo: string; mensagem: string } {
+  const data = res?.data || {};
+  switch (data.acao) {
+    case "nfse_duplicada_bloqueada":
+      return {
+        titulo: "NF-e já emitida neste mês",
+        mensagem:
+          data.error ||
+          "Já existe uma nota fiscal para este cliente neste mês. Para evitar duplicidade, não emitimos uma segunda.",
+      };
+    case "em_processamento":
+      return {
+        titulo: "Emissão em andamento",
+        mensagem:
+          "Já existe uma emissão em andamento para esta fatura. Aguarde alguns instantes e atualize.",
+      };
+    case "nfse_rejeitada":
+      return {
+        titulo: "Nota rejeitada",
+        mensagem:
+          "A prefeitura rejeitou a nota. Verifique os dados do cliente e tente novamente.",
+      };
+    case "ignorado":
+      return {
+        titulo: "Emissão não aplicável",
+        mensagem:
+          data.motivo === "emitir_nf=False"
+            ? "Esta empresa está configurada para NÃO emitir nota fiscal."
+            : "A emissão não se aplica a esta fatura/empresa.",
+      };
+    default:
+      return {
+        titulo: "Não foi possível emitir",
+        mensagem:
+          data.error ||
+          res?.error ||
+          "Não foi possível emitir a Nota Fiscal para esta fatura.",
+      };
+  }
+}
+
+// ============================================================
 // Helpers de mês
 // ============================================================
 const MESES = [
@@ -250,8 +295,12 @@ export default function FaturasScreen() {
         setActionLoading(false);
         if (res.data?.success) {
           alertMsg("Sucesso", "Nota Fiscal emitida e enviada com sucesso!");
+          setModalVisible(false);
+          setDetalhe(null);
+          fetchFaturas();
         } else {
-          alertMsg("Erro", "Não foi possível emitir a Nota Fiscal para esta fatura.");
+          const f = falhaEmissao(res);
+          alertMsg(f.titulo, f.mensagem);
         }
       },
     );
@@ -272,7 +321,8 @@ export default function FaturasScreen() {
           setDetalhe(null);
           fetchFaturas();
         } else {
-          alertMsg("Erro", "Não foi possível emitir a Nota Fiscal para esta fatura.");
+          const f = falhaEmissao(res);
+          alertMsg(f.titulo, f.mensagem);
         }
       },
     );
@@ -322,9 +372,12 @@ export default function FaturasScreen() {
           "Fatura baixada com sucesso! A Nota Fiscal foi emitida e enviada automaticamente."
         );
       } else {
+        // Baixou, mas a nota não saiu (duplicata no mês, rejeição, empresa que não
+        // emite...). O backend manda uma mensagem específica — mostramos ela.
         alertMsg(
-          "Sucesso",
-          "Fatura baixada com sucesso! A Nota Fiscal não foi emitida para este cliente."
+          "Fatura baixada",
+          res.data?.mensagem ||
+            "Fatura baixada com sucesso! A Nota Fiscal não foi emitida para este cliente."
         );
       }
       setBaixaInvoiceId(null);

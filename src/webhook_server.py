@@ -342,7 +342,8 @@ async def processar_pagamento(
                 "cnpj": cnpj,
                 "empresa": empresa.razao_social,
                 "acao": "nfse_duplicada_bloqueada",
-                "error": f"NFS-e já emitida para esta fatura. {nfse_existente.get('detalhe', '')}",
+                "error": nfse_existente.get("detalhe")
+                or "NFS-e já existe para esta fatura/cliente neste mês.",
                 "nfse_existente": nfse_existente,
             }
 

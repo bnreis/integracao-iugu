@@ -43,6 +43,20 @@ from .config import settings
 _LOCK_INVOICE_TTL_SEGUNDOS = 300
 
 
+def _normalizar_doc(doc: str | None) -> str:
+    """Normaliza um CNPJ/CPF para comparação robusta de identidade.
+
+    Remove tudo que não for alfanumérico e põe em maiúsculas. Tolera os dois lados
+    virem em formatos diferentes (com/sem máscara) e já prepara o terreno para o
+    CNPJ ALFANUMÉRICO (Receita/Iugu, jul/2026) — por isso mantemos letras, em vez
+    de filtrar só dígitos. Comparar via esta função evita um falso "não-duplicata"
+    causado por divergência de formatação entre o log e a fatura.
+    """
+    if not doc:
+        return ""
+    return re.sub(r"[^0-9A-Za-z]", "", str(doc)).upper()
+
+
 def _pid_vivo(pid: int) -> bool:
     """Indica se o processo `pid` ainda está vivo (best-effort, cross-platform).
 
@@ -184,13 +198,18 @@ def _verificar_nfse_duplicada(
     invoice_id: str, cnpj: str, invoice: dict, empresa: Any = None
 ) -> dict | None:
     """
-    Verifica se já existe NFS-e emitida para esta fatura.
+    Verifica se já existe NFS-e emitida que impeça emitir agora.
     Guardrail BASEADO EM EVIDÊNCIA: só um log de emissão REAL bem-sucedido
-    (nfse_<invoice_id>.json com sucesso=True) prova que a nota existe.
+    (nfse_<invoice_id>.json com sucesso=True), OU uma fatura marcada manualmente
+    como já emitida, prova que a nota existe.
     Checa duas fontes:
-      1. Log local por invoice_id, com sucesso=True (nfse_emitidas/*.json)
-      2. Mesmo CNPJ + mesmo mês + mesmo valor nos logs reais (sucesso=True)
-         — anti-duplicata geral, usando os campos reais do log.
+      1. Log local por invoice_id, com sucesso=True (nfse_emitidas/*.json) —
+         barra REEMISSÃO da MESMA fatura (retry de webhook, cron x pagamento).
+      2. Mesmo CNPJ + mesmo MÊS de emissão (independente do valor/fatura) —
+         REGRA DE NEGÓCIO: no máximo 1 NFS-e por cliente por mês. Barra a 2ª nota
+         do mesmo cliente no mês — automática OU manual — cobrindo também o caso
+         de fatura cancelada+recriada no mesmo mês (mesmo com valor divergente,
+         ex.: ISS retido líquido vs bruto). Cross-mês: usar a marcação manual.
 
     `empresa` é mantido na assinatura apenas por compatibilidade com os
     chamadores; não é mais usado (a regra antiga de nf_na_criacao foi removida
@@ -221,39 +240,48 @@ def _verificar_nfse_duplicada(
             # Arquivo corrompido/parcial: ignora a regra 1 e segue para a regra 2.
             pass
 
-    # 2. Anti-duplicata geral: mesmo CNPJ + mesmo valor + mesmo MÊS (campos reais).
+    # 2. Anti-duplicata por CLIENTE+MÊS: no máximo 1 NFS-e por CNPJ por mês de
+    # emissão. INDEPENDENTE do valor/fatura (a regra antiga exigia mesmo valor e
+    # deixava passar: 2ª fatura com valor diferente, e cancelada+recriada com ISS
+    # retido — log=bruto, fatura=líquido). Vale para emissão automática E manual.
     # (M2) O log grava data_emissao = date.today(), mas a fatura traz paid_at. Num
     # reprocessamento na virada do mês esses dois meses divergem — então casamos o
     # mês do log com QUALQUER um dos dois: o mês do pagamento OU o mês de hoje.
+    # Cross-mês (cancelar num mês e refazer no outro) NÃO é coberto aqui de
+    # propósito — esse caso é tratado pela marcação manual "NF-e já emitida".
     if nfse_dir.exists():
-        valor_reais = round(
-            (int(invoice.get("total_paid_cents") or invoice.get("total_cents") or 0)) / 100.0,
-            2,
-        )
+        cnpj_norm = _normalizar_doc(cnpj)
         mes_pagamento = (invoice.get("paid_at") or "")[:7]  # "2026-04"
         mes_hoje = date.today().isoformat()[:7]
         meses_validos = {m for m in (mes_pagamento, mes_hoje) if len(m) >= 7}
 
-        if valor_reais > 0 and meses_validos:
+        if cnpj_norm and meses_validos:
             for log_file in nfse_dir.glob("*.json"):
                 try:
                     data = _json.loads(log_file.read_text(encoding="utf-8"))
-                    mes_log = (data.get("data_emissao") or "")[:7]
-                    if (
-                        data.get("sucesso") is True
-                        and data.get("cnpj") == cnpj
-                        and data.get("valor") == valor_reais
-                        and mes_log in meses_validos
-                    ):
-                        return {
-                            "fonte": "duplicata_mes_valor",
-                            "detalhe": (
-                                f"NFS-e já existe para CNPJ {cnpj} "
-                                f"no mês {mes_log} com valor R$ {valor_reais:.2f}"
-                            ),
-                            "arquivo": log_file.name,
-                        }
                 except Exception:
                     continue
+                if data.get("sucesso") is not True:
+                    continue
+                # A própria fatura já é tratada pela Regra 1; ignora aqui para a
+                # mensagem não apontar a fatura atual como "a nota que já existe".
+                if data.get("invoice_id") == invoice_id:
+                    continue
+                if _normalizar_doc(data.get("cnpj")) != cnpj_norm:
+                    continue
+                mes_log = (data.get("data_emissao") or "")[:7]
+                if mes_log in meses_validos:
+                    return {
+                        "fonte": "duplicata_cliente_mes",
+                        "detalhe": (
+                            f"Já existe NFS-e para o CNPJ {cnpj} no mês {mes_log} "
+                            f"(fatura {data.get('invoice_id') or '?'}, "
+                            f"nota nº {data.get('numero_nfse') or '?'}). "
+                            f"Limite de 1 NFS-e por cliente por mês."
+                        ),
+                        "arquivo": log_file.name,
+                        "invoice_id_existente": data.get("invoice_id"),
+                        "numero_nfse": data.get("numero_nfse"),
+                    }
 
     return None

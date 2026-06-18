@@ -32,10 +32,15 @@ duas classes de risco ficam expostas:
    **real bem-sucedida** `nfse_<invoice_id>.json` com `sucesso=true` (gravado por
    `_gravar_log_nfse` apenas em sucesso). Duas regras:
    - **Regra 1 (primária):** abrir o arquivo determinístico `nfse_<invoice_id>.json` e bloquear
-     se `sucesso=true`.
-   - **Regra 2 (backstop):** mesmo CNPJ + mesmo valor (em reais) + mesmo mês, usando os campos
-     reais do log; o mês casa contra `paid_at[:7]` **ou** o mês corrente (cobre reprocessamento
-     na virada do mês).
+     se `sucesso=true`. Barra a reemissão da **mesma fatura** (retry de webhook, cron×pagamento).
+   - **Regra 2 (cliente+mês — atualizada 18/06/2026):** **no máximo 1 NFS-e por CNPJ por mês de
+     emissão**, INDEPENDENTE do valor/fatura. O mês casa contra `paid_at[:7]` **ou** o mês
+     corrente; o CNPJ é normalizado dos dois lados (`_normalizar_doc`, tolera máscara e prepara
+     CNPJ alfanumérico). Barra a **2ª nota do mesmo cliente no mês** — automática OU manual —
+     incluindo fatura cancelada+recriada no mês (mesmo com valor divergente, ex.: ISS retido
+     líquido×bruto). **Antes** exigia também *mesmo valor*, o que deixava passar 2 faturas de
+     valores diferentes e a recriação com ISS retido. Cross-mês não é coberto aqui (de
+     propósito) — usar a **marcação manual "NF-e já emitida"**.
    - Removidos os gatilhos por flag (`nf_na_criacao`, custom_variable) e por `dps_*`.
 
 2. **Lock por `invoice_id` (cross-process).** Módulo neutro **`src/nfse_guard.py`** com um
@@ -107,3 +112,19 @@ a reemissão e todos os leitores (lista/detalhe/dashboard) mostram a fatura como
   serviço); reusa o mecanismo de evidência (Regra 1), sem heurística de valor/competência.
 - **Limitação aceita:** "Reenviar NF-e" numa fatura marcada-manualmente envia e-mail **sem
   XML anexo** (o índice não tem `xml_enviado_path`). Não é o fluxo esperado dessa ação.
+
+### Guardrail "1 NFS-e por cliente por mês" (18/06/2026)
+
+A Regra 2 passou a bloquear por **CNPJ + mês**, sem olhar valor (ver Decisão acima). Vale para
+**automático e manual** (todos os caminhos passam por `_verificar_nfse_duplicada`: webhook,
+`/emitir`, `/emitir-manual`, `/baixa-manual`, cron).
+
+- **Trade-off aceito:** se um cliente legitimamente precisar de **2 notas no mesmo mês**, a 2ª é
+  barrada. É o comportamento desejado (cobrança recorrente = 1 nota/mês/cliente). Caso real e
+  raro de 2ª nota legítima exigiria um override explícito (não implementado — manter o bloqueio).
+- **Validação:** `scripts/validar_guardrail_nfse.py` exercita 9 cenários offline (mesma fatura,
+  2ª fatura mesmo/diferente valor, ISS retido recriado, cliente/mês diferente, rejeição, máscara
+  de CNPJ, marcação manual) — todos verdes. Rodar após mexer no guardrail.
+- **Bypass residual conhecido:** `scripts/emitir_nfse_manual.py` (CLI) chama `emitir_nfse`
+  direto, **fora** do lock/guardrail. Regra operacional já existente: emitir só pela VPS pelos
+  fluxos do painel; o CLI é ferramenta de diagnóstico.
