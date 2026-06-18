@@ -36,6 +36,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from loguru import logger
@@ -274,6 +275,38 @@ def customer_para_empresa(customer: dict[str, Any]) -> Empresa | None:
 COLUNAS = Empresa._COLUNAS_LEGADO
 
 
+# ============================================================
+# Registro local de customer_ids (contorno da listagem quebrada da Iugu)
+# ============================================================
+# A listagem /v1/customers da Iugu passou a devolver incompleta (1 cliente), mas o
+# GET por ID funciona. Mantemos um registro persistido dos customer_ids conhecidos:
+# o carregar() le esse registro + as fontes da API e busca cada cliente por ID; os
+# IDs resolvidos sao re-gravados (auto-cura). Semeado por scripts/seed_customer_ids.py.
+# Some naturalmente quando a Iugu corrigir a listagem.
+_REGISTRO_IDS_PATH = Path(settings.nfse_output_dir) / "registro_customer_ids.json"
+
+
+def _ler_registro_customer_ids() -> set[str]:
+    """Le o registro persistido de customer_ids. Conjunto vazio se ausente/invalido."""
+    try:
+        data = json.loads(_REGISTRO_IDS_PATH.read_text(encoding="utf-8-sig"))
+        return {str(x) for x in data.get("customer_ids", []) if x}
+    except Exception:
+        return set()
+
+
+def _salvar_registro_customer_ids(ids: set[str]) -> None:
+    """Grava o registro de customer_ids (best-effort; nao derruba o fluxo)."""
+    try:
+        _REGISTRO_IDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _REGISTRO_IDS_PATH.write_text(
+            json.dumps({"customer_ids": sorted(ids)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Falha ao salvar registro de customer_ids: {e}")
+
+
 class EmpresasRepository:
     """
     Le e consulta empresas usando a Iugu como fonte de dados.
@@ -309,6 +342,9 @@ class EmpresasRepository:
                 # customer_id das FATURAS (list_invoices lista normalmente) — assim
                 # todo cliente com fatura entra, mesmo com a listagem quebrada.
                 ids: set[str] = set()
+
+                # Registro local (contorno da listagem quebrada): IDs ja conhecidos.
+                ids |= _ler_registro_customer_ids()
 
                 start = 0
                 while True:
@@ -397,6 +433,14 @@ class EmpresasRepository:
             raise
 
         self._carregada = True
+        # Auto-cura: persiste os IDs resolvidos no registro (uniao com o existente),
+        # para a próxima carga já trazer todos por ID mesmo com a listagem quebrada.
+        try:
+            _salvar_registro_customer_ids(
+                set(self._empresas.keys()) | _ler_registro_customer_ids()
+            )
+        except Exception:  # noqa: BLE001
+            pass
         logger.info(f"Iugu carregada: {len(self._empresas)} empresas (CNPJ)")
 
     def buscar_por_cnpj(self, cnpj: str) -> Optional[Empresa]:
@@ -455,6 +499,13 @@ class EmpresasRepository:
             emp = customer_para_empresa(cust)
             if emp and emp.customer_id:
                 self._empresas[emp.customer_id] = emp  # cacheia p/ proximas consultas
+                # Auto-cura: registra o ID p/ aparecer nas proximas cargas/lista.
+                try:
+                    _salvar_registro_customer_ids(
+                        {emp.customer_id} | _ler_registro_customer_ids()
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
                 logger.info(
                     f"[on-demand] Empresa resolvida por customer_id direto: "
                     f"{emp.razao_social} ({emp.customer_id})"
