@@ -22,6 +22,13 @@ App mobile/web (Expo) em produção (APK + painel web). Mudanças deployadas:
 3. 🔴 **Rotação de credenciais** (seção 8): webhook token, senha A1 (`mega10`), senha SMTP.
 4. ⚠️ **Emitir/gerar só pela VPS** (contador de RPS por máquina) + pedir mais RPS série 3 antes de esgotar 1–50.
 
+### 🧭 Estratégia futura — mudança de classificação tributária (se necessário)
+Avaliado em 18/06: trocar a **classificação fiscal** da NFS-e (Descrição, Atividade Municipal/item LC116, Tributação Nacional, NBS) é **simples tecnicamente** (são config), mas **sensível fiscalmente** (validar com a contabilidade + cadastro do prestador no DF). Mapa do que controlamos hoje:
+- **Descrição dos serviços** → `descricao_servico` (cadastro da empresa, no `notes`) ou `nfse_descricao_servico_padrao` (`.env`). Já editável.
+- **Item LC116** → `codigo_servico` (cadastro, ex.: `01.07`). **CodigoTributacaoMunicipio** → `settings.nfse_codigo_trib_municipal` (`.env`, hoje **1071** — GLOBAL p/ todas as empresas).
+- **Tributação Nacional (cTribNac)** e **NBS**: ⚠️ **NÃO enviamos no XML ABRASF 2.04** (produção) — o ISSnet/DF **deriva** do código municipal. Só aparecem no XML no backend **nacional/DPS** (`_normalizar_cTribNac` + `cNBS`), p/ pós-30/06.
+- **Plano se precisar variar por cliente:** tornar `codigo_servico` + `codigo_trib_municipal` (+ descrição) **por empresa** (campos no `notes`, igual já feito com `aliquota_iss`/`iss_retido`/`inscricao_municipal`) — mudança **pequena**, padrão já estabelecido. Surfacing no app: novos campos na seção de cobrança do cadastro. **Antes:** confirmar com o contador a combinação item+código municipal+alíquota correta e a habilitação do prestador no DF.
+
 ---
 
 ## 1. Projeto em uma linha
