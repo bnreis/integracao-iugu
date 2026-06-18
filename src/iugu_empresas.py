@@ -361,7 +361,12 @@ class EmpresasRepository:
                     try:
                         return client.get_customer(cust_id)
                     except IuguAPIError as e:
-                        logger.warning(f"Erro ao buscar customer {cust_id}: {e.message}")
+                        # 404 é esperado: customer_id de FATURA ANTIGA cujo cliente
+                        # foi recriado/excluído na Iugu — só ruído, não erro real.
+                        if getattr(e, "status_code", None) == 404:
+                            logger.debug(f"customer {cust_id} inexistente (404) — ID de fatura antiga")
+                        else:
+                            logger.warning(f"Erro ao buscar customer {cust_id}: {e.message}")
                         return None
 
                 if todos_ids:
