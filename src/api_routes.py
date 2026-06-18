@@ -523,13 +523,21 @@ async def criar_fatura(req: CriarFaturaRequest):
     due_date = date.today() + timedelta(days=req.dias_vencimento)
     metodos = [m.strip() for m in settings.fatura_metodos_pagamento.split(",") if m.strip()]
 
+    # ISS retido: o operador informa o valor BRUTO; cobramos o LÍQUIDO (bruto − ISS)
+    # e guardamos o bruto numa custom_variable p/ a NFS-e sair com o valor cheio.
+    valor_bruto = req.valor_cents
+    if empresa.iss_retido and empresa.aliquota_iss:
+        valor_cobranca = int(round(valor_bruto * (1 - empresa.aliquota_iss / 100.0)))
+    else:
+        valor_cobranca = valor_bruto
+
     payload = {
         "email": empresa.email or "",
         "due_date": due_date,
         "items": [{
             "description": req.descricao,
             "quantity": 1,
-            "price_cents": req.valor_cents,
+            "price_cents": valor_cobranca,
         }],
         # Repassa o customer_id da empresa resolvida para que invoice.customer_id
         # chegue preenchido no webhook (se ausente, create_invoice não o envia).
@@ -547,6 +555,8 @@ async def criar_fatura(req: CriarFaturaRequest):
         "custom_variables": [
             {"name": "origem", "value": "app_mobile"},
             {"name": "cnpj_tomador", "value": empresa.cnpj},
+            # Bruto p/ a NFS-e (quando ISS retido, o boleto é o líquido).
+            {"name": "valor_bruto_nfse", "value": str(valor_bruto)},
         ],
     }
 

@@ -110,8 +110,18 @@ class Empresa:
 
     @property
     def valor_fatura_cents(self) -> int:
-        """Converte 'valor_fatura' (BR: '1850,00') para centavos (int)."""
+        """Converte 'valor_fatura' (BR: '1850,00') para centavos (int). Valor BRUTO."""
         return parse_valor_br_to_cents(self.valor_fatura)
+
+    @property
+    def valor_cobranca_cents(self) -> int:
+        """Valor a COBRAR na Iugu (boleto). Se ISS retido na fonte, abate a alíquota
+        de retenção (= aliquota_iss) do bruto → líquido; senão, o próprio bruto.
+        Ex.: bruto 3.276,00 a 2% → líquido 3.210,48. O valor BRUTO segue na NFS-e."""
+        bruto = self.valor_fatura_cents
+        if self.iss_retido and self.aliquota_iss:
+            return int(round(bruto * (1 - self.aliquota_iss / 100.0)))
+        return bruto
 
     def tem_boleto_recorrente(self) -> bool:
         """True se a empresa tem valor e dia configurados para cobranca automatica."""

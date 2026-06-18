@@ -383,7 +383,10 @@ async def processar_pagamento(
                 # precisa deles. Enriquece o dict (sem mutar a chave 'nfse' do retorno)
                 # com os mesmos campos que o log .json e o reenvio manual usam, para
                 # que auto-envio e reenviar gerem e-mail IDÊNTICO.
-                total_cents = int(
+                # Valor do e-mail = BRUTO da NFS-e (valor_bruto_nfse) quando ISS
+                # retido; senão o total pago. Mantém o e-mail coerente com a nota.
+                from .nfse_df import _valor_bruto_nfse_cents
+                total_cents = _valor_bruto_nfse_cents(invoice) or int(
                     invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
                 )
                 dados_email = {

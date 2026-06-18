@@ -111,6 +111,22 @@ class DadosServico:
     aliquota_iss: float
 
 
+def _valor_bruto_nfse_cents(invoice: dict[str, Any]) -> Optional[int]:
+    """Valor BRUTO (centavos) para a NFS-e, lido da custom_variable 'valor_bruto_nfse'.
+
+    Quando a empresa tem ISS retido, o boleto na Iugu cobra o LÍQUIDO, mas a NFS-e
+    deve sair com o valor CHEIO (bruto) — gravado nessa variável na criação da fatura.
+    Retorna None se ausente/inválida (aí o chamador usa o total da fatura)."""
+    for var in (invoice.get("custom_variables") or []):
+        if isinstance(var, dict) and var.get("name") == "valor_bruto_nfse":
+            try:
+                v = int(str(var.get("value")).strip())
+                return v if v > 0 else None
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
 @dataclass
 class ResultadoEmissao:
     sucesso: bool
@@ -230,7 +246,9 @@ async def _emitir_abrasf204(invoice: dict[str, Any], empresa: Empresa) -> dict[s
         ).to_dict()
 
     # 1. Validação básica (mesma do nacional — config + valor da fatura)
-    total_cents = int(
+    # Valor da NFS-e = BRUTO (custom_variable valor_bruto_nfse) quando ISS retido;
+    # senão, o total da fatura. Assim o líquido da nota bate com o valor cobrado.
+    total_cents = _valor_bruto_nfse_cents(invoice) or int(
         invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
     )
     if total_cents <= 0:
@@ -1293,7 +1311,9 @@ async def _emitir_nacional(invoice: dict[str, Any], empresa: Empresa) -> dict[st
         ).to_dict()
 
     # 1. Validação básica
-    total_cents = int(
+    # Valor da NFS-e = BRUTO (custom_variable valor_bruto_nfse) quando ISS retido;
+    # senão, o total da fatura. Assim o líquido da nota bate com o valor cobrado.
+    total_cents = _valor_bruto_nfse_cents(invoice) or int(
         invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
     )
     if total_cents <= 0:
@@ -2513,8 +2533,11 @@ def _gravar_log_nfse(
         logger.warning("[NFS-e log] invoice sem 'id' — log .json não será gravado")
         return None
 
-    # Valor em reais (os leitores exibem 'valor' como R$ com 2 casas).
-    total_cents = int(invoice.get("total_paid_cents") or invoice.get("total_cents") or 0)
+    # Valor em reais (os leitores exibem 'valor' como R$ com 2 casas). Usa o BRUTO
+    # (valor_bruto_nfse) quando ISS retido, p/ o registro/e-mail baterem com a nota.
+    total_cents = _valor_bruto_nfse_cents(invoice) or int(
+        invoice.get("total_paid_cents") or invoice.get("total_cents") or 0
+    )
     valor_reais = round(total_cents / 100.0, 2)
 
     log = {

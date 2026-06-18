@@ -97,6 +97,21 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
   const [inscricaoMunicipal, setInscricaoMunicipal] = useState(
     isEditMode ? empresaParam.inscricao_municipal || "" : ""
   );
+  // Percentual de retenção = alíquota de ISS (usada na NFS-e e no cálculo do líquido).
+  const [aliquotaIss, setAliquotaIss] = useState(
+    isEditMode && empresaParam.aliquota_iss != null
+      ? String(empresaParam.aliquota_iss).replace(".", ",")
+      : "2"
+  );
+  // Valor Final Líquido (só exibição): Valor da Fatura − percentual. Auto-calculado.
+  const _brToNum = (s: string) => {
+    let c = (s || "").trim();
+    if (c.includes(",")) c = c.replace(/\./g, "").replace(",", ".");
+    return parseFloat(c) || 0;
+  };
+  const valorLiquidoCalc = (
+    _brToNum(valorFatura) * (1 - _brToNum(aliquotaIss) / 100)
+  ).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const [ativa, setAtiva] = useState(
     isEditMode ? empresaParam.ativo !== false : true
   );
@@ -171,6 +186,7 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
         nf_na_criacao: nfNaCriacao,
         iss_retido: issRetido,
         inscricao_municipal: inscricaoMunicipal.trim(),
+        aliquota_iss: parseFloat(aliquotaIss.replace(",", ".")) || 2,
         ativo: ativa,
         // Endereco
         zip_code: zipCode.replace(/\D/g, ""),
@@ -209,6 +225,7 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
         nf_na_criacao: nfNaCriacao,
         iss_retido: issRetido,
         inscricao_municipal: inscricaoMunicipal.trim(),
+        aliquota_iss: parseFloat(aliquotaIss.replace(",", ".")) || 2,
         // Endereco
         zip_code: zipCode.replace(/\D/g, ""),
         street: street.trim(),
@@ -418,15 +435,6 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
           Configuracoes
         </Text>
 
-        <Text style={styles.label}>Inscricao Municipal (tomador)</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Obrigatoria quando ISS retido na fonte"
-          value={inscricaoMunicipal}
-          onChangeText={setInscricaoMunicipal}
-          keyboardType="number-pad"
-        />
-
         <View style={styles.toggleRow}>
           <Text style={styles.toggleLabel}>Emitir NF-e</Text>
           <Switch
@@ -456,6 +464,38 @@ export default function CadastrarEmpresaScreen({ navigation, route }: any) {
             thumbColor={issRetido ? "#1a56db" : "#f4f3f4"}
           />
         </View>
+
+        {/* Campos da retenção — só quando ISS retido na fonte */}
+        {issRetido && (
+          <View style={styles.retencaoBox}>
+            <Text style={styles.label}>Inscrição Municipal (tomador) *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="IM do tomador (obrigatória na retenção)"
+              value={inscricaoMunicipal}
+              onChangeText={setInscricaoMunicipal}
+              keyboardType="number-pad"
+            />
+            <Text style={styles.label}>Percentual de retenção (%) *</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="2"
+              value={aliquotaIss}
+              onChangeText={setAliquotaIss}
+              keyboardType="decimal-pad"
+            />
+            <Text style={styles.label}>Valor Final Líquido (R$)</Text>
+            <TextInput
+              style={[styles.input, { backgroundColor: "#f3f4f6", color: "#6b7280" }]}
+              value={valorLiquidoCalc}
+              editable={false}
+            />
+            <Text style={styles.hint}>
+              Calculado: Valor da Fatura − {aliquotaIss || "0"}%. O boleto na Iugu cobra o
+              líquido; a NFS-e usa o Valor da Fatura (bruto).
+            </Text>
+          </View>
+        )}
 
         <View style={styles.toggleRow}>
           <Text style={styles.toggleLabel}>Ativa</Text>
@@ -521,6 +561,19 @@ const styles = StyleSheet.create({
   inputDisabled: {
     backgroundColor: "#f3f4f6",
     color: "#9ca3af",
+  },
+  retencaoBox: {
+    backgroundColor: "#eff6ff",
+    borderRadius: 10,
+    padding: 12,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: "#bfdbfe",
+  },
+  hint: {
+    fontSize: 11,
+    color: "#6b7280",
+    marginTop: 6,
   },
   multiline: {
     minHeight: 60,

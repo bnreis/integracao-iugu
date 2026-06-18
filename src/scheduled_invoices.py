@@ -160,14 +160,18 @@ def criar_boleto_para_empresa(
     client: Optional[IuguClient] = None,
 ) -> ResultadoEmpresa:
     """Cria UM boleto para a empresa. Captura erros e retorna um Resultado."""
-    valor_cents = emp.valor_fatura_cents
-    if valor_cents <= 0:
+    valor_bruto = emp.valor_fatura_cents
+    if valor_bruto <= 0:
         return ResultadoEmpresa(
             cnpj=emp.cnpj,
             razao_social=emp.razao_social,
             sucesso=False,
             erro="valor_fatura inválido ou zero",
         )
+    # Valor a COBRAR: líquido (bruto − ISS) quando há retenção; senão, o bruto.
+    # O bruto vai numa custom_variable p/ a NFS-e usar o valor cheio (líquido da nota
+    # = valor cobrado). Ver iugu_empresas.valor_cobranca_cents.
+    valor_cents = emp.valor_cobranca_cents
 
     due_date = data_criacao + timedelta(days=DIAS_VENCIMENTO)
     descricao = emp.descricao_boleto or emp.descricao_servico or "Serviço mensal"
@@ -198,6 +202,9 @@ def criar_boleto_para_empresa(
             {"name": "tipo", "value": "boleto_recorrente"},
             {"name": "cnpj_tomador", "value": emp.cnpj},
             {"name": "data_referencia", "value": data_criacao.isoformat()},
+            # Valor BRUTO p/ a NFS-e: quando ISS retido, o boleto cobra o líquido,
+            # mas a NFS-e deve sair com o valor cheio (bruto). nfse_df lê isto.
+            {"name": "valor_bruto_nfse", "value": str(valor_bruto)},
             # Sempre "false" na criação. Só vira "true" APÓS a emissão da NFS-e
             # retornar sucesso (ver _emitir_nfse_para_fatura). Se a emissão falhar,
             # a flag fica "false" e o webhook reprocessa a nota no pagamento —
