@@ -361,43 +361,22 @@ class EmpresasRepository:
                     if start >= total:
                         break
 
-                # Complementa com os customer_id das faturas (robusto à listagem
-                # incompleta). Teto de páginas como salvaguarda; faturas recentes
-                # vêm primeiro, então cobre os clientes ativos.
-                try:
-                    start = 0
-                    paginas = 0
-                    # ⚠️ TETO BAIXO (3 páginas = 300 faturas recentes): carregar roda
-                    # DENTRO da requisição e bloqueia o worker; varrer muitas páginas
-                    # travava o app até estourar a conexão. As faturas recentes já
-                    # cobrem os clientes ativos; o resto resolve on-demand/Iugu.
-                    # Só faturas RECENTES (últimos 120 dias): cobrem os clientes
-                    # ATUAIS (que faturam no período) e evitam IDs de clientes
-                    # antigos/recriados (404). Menos páginas, menos lixo.
-                    from datetime import date as _date, timedelta as _timedelta
-                    _recente = (_date.today() - _timedelta(days=120)).isoformat()
-                    while paginas < 3:
-                        inv = client.list_invoices(
-                            limit=100,
-                            start=start,
-                            created_at_from=f"{_recente}T00:00:00-03:00",
-                        )
-                        inv_items = inv.get("items", [])
-                        if not inv_items:
-                            break
-                        for it in inv_items:
-                            cid = it.get("customer_id")
-                            if cid:
-                                ids.add(cid)
-                        total_inv = inv.get("totalItems", 0)
-                        start += len(inv_items)
-                        paginas += 1
-                        if start >= total_inv:
-                            break
-                except IuguAPIError as e:
-                    logger.warning(
-                        f"[CARREGAR] Falha ao coletar customer_id das faturas: {e.message}"
-                    )
+                # Enumeração por BUSCA (contorno da listagem base quebrada): a
+                # listagem sem filtro devolve só 1, mas /v1/customers?query=<termo>
+                # FUNCIONA. Buscamos por VOGAIS (cobrem ~todos os nomes PT-BR) em
+                # paralelo e unimos os IDs — rápido (não bloqueia o worker) e sem o
+                # ruído/lentidão das faturas (404 de clientes antigos). Cobertura
+                # mais ampla (a-z) fica no scripts/seed_customer_ids.py.
+                def _query_ids(termo: str) -> set[str]:
+                    try:
+                        r = client.list_customers(query=termo, limit=100)
+                        return {i.get("id") for i in r.get("items", []) if i.get("id")}
+                    except Exception:  # noqa: BLE001
+                        return set()
+
+                with ThreadPoolExecutor(max_workers=5) as ex:
+                    for s in ex.map(_query_ids, ["a", "e", "i", "o", "u"]):
+                        ids |= s
 
                 todos_ids: list[str] = list(ids)
 
