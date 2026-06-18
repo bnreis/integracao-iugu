@@ -21,6 +21,7 @@ import {
   cancelarFatura,
   emitirNfse,
   emitirNfseManual,
+  marcarNfseEmitida,
   reenviarNfseEmail,
   darBaixaManual,
 } from "../services/api";
@@ -335,6 +336,38 @@ export default function FaturasScreen() {
     }
   };
 
+  // Marca a fatura como JÁ tendo NF-e emitida (sem emitir agora). Cenário: a nota
+  // foi emitida por uma fatura anterior (cancelada+recriada) e esta fatura nova
+  // apareceria como pendente — isto bloqueia uma reemissão indevida no pagamento.
+  const handleMarcarNfseEmitida = (id: string) => {
+    confirmar(
+      "Marcar NF-e como já emitida",
+      "Use isto quando a Nota Fiscal deste serviço JÁ foi emitida por outra fatura " +
+        "(ex.: fatura cancelada e refeita). O sistema vai marcar esta fatura como " +
+        "emitida e NÃO emitirá uma nova nota quando ela for paga. Confirmar?",
+      async () => {
+        setActionLoading(true);
+        const res = await marcarNfseEmitida(id);
+        setActionLoading(false);
+        if (res.data?.sucesso) {
+          alertMsg(
+            "Pronto",
+            res.data?.mensagem ||
+              "Fatura marcada como NF-e já emitida. A emissão automática foi bloqueada."
+          );
+          setModalVisible(false);
+          setDetalhe(null);
+          fetchFaturas();
+        } else {
+          alertMsg(
+            "Erro",
+            res.data?.error || res.error || "Não foi possível marcar a fatura."
+          );
+        }
+      },
+    );
+  };
+
   const FORMAS_PAGAMENTO = ["Pix na conta", "Dinheiro", "Outros"];
 
   const filtros = [
@@ -628,6 +661,23 @@ export default function FaturasScreen() {
                         <Text style={styles.actionText}>Cancelar</Text>
                       </TouchableOpacity>
                     </>
+                  )}
+                  {/* Marcar como JÁ emitida — quando a nota saiu por outra fatura
+                      (cancelada+recriada). Bloqueia reemissão indevida no pagamento.
+                      Vale p/ empresa que emite NF-e e fatura ainda sem nota. */}
+                  {detalhe.empresa_emite_nf !== false &&
+                    !detalhe.nfse_emitida &&
+                    ["pending", "expired", "paid", "externally_paid"].includes(
+                      detalhe.status
+                    ) && (
+                    <TouchableOpacity
+                      style={[styles.actionBtn, { backgroundColor: "#6b7280" }]}
+                      onPress={() => handleMarcarNfseEmitida(detalhe.id)}
+                      disabled={actionLoading}
+                    >
+                      <Ionicons name="checkmark-done-circle" size={16} color="#fff" />
+                      <Text style={styles.actionText}>Marcar NF-e como já emitida</Text>
+                    </TouchableOpacity>
                   )}
                 </View>
 

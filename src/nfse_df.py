@@ -2499,6 +2499,7 @@ def _gravar_log_nfse(
     empresa: Empresa,
     resultado: ResultadoEmissao,
     rps_numero: Optional[int | str] = None,
+    marcada_manualmente: bool = False,
 ) -> Optional[Path]:
     """Grava o log `nfse_<invoice_id>.json` que a API lê para detectar a nota emitida.
 
@@ -2557,6 +2558,11 @@ def _gravar_log_nfse(
         "rps_numero": str(rps_numero) if rps_numero is not None else None,
         "padrao": settings.nfse_padrao,
         "ambiente": resultado.ambiente or settings.nfse_ambiente,
+        # Marcação manual: a nota NÃO foi emitida agora por este sistema; um operador
+        # registrou que esta fatura já está coberta por uma NFS-e emitida antes (ex.:
+        # fatura cancelada+recriada). Faz o painel mostrar "emitida" e o guardrail
+        # (regra 1, por invoice_id) BLOQUEAR uma reemissão indevida no pagamento.
+        "marcada_manualmente": bool(marcada_manualmente),
     }
 
     try:
@@ -2620,12 +2626,44 @@ def _gravar_log_nfse(
         return None
 
 
+def registrar_nfse_emitida_manual(
+    invoice: dict[str, Any],
+    empresa: Empresa,
+    numero_nfse: Optional[str] = None,
+    codigo_verificacao: Optional[str] = None,
+) -> Optional[Path]:
+    """Marca uma fatura como JÁ tendo NFS-e emitida — sem emitir nada agora.
+
+    Caso de uso (ADR-0006 / cenário fatura cancelada+recriada): a NFS-e do serviço
+    já foi emitida por uma fatura ANTERIOR (cancelada). A fatura NOVA tem um
+    `invoice_id` diferente, então não possui índice `nfse_<id>.json` — o painel a
+    mostra como "pendente" e, ao ser paga, o guardrail (regra 1, por invoice_id)
+    não acharia evidência e poderia emitir uma SEGUNDA nota (duplicada/indevida).
+
+    Esta função grava o índice `nfse_<invoice_id>.json` (sucesso=True,
+    `marcada_manualmente=True`) apontando para a nota já existente. A partir daí:
+      • o painel/dashboard mostram a fatura como "emitida"; e
+      • a anti-duplicata BLOQUEIA a emissão automática quando a fatura for paga.
+
+    Não envia e-mail nem toca no provedor — é apenas o registro local de evidência.
+    `numero_nfse`/`codigo_verificacao` são opcionais (rastreio da nota de origem).
+    """
+    resultado = ResultadoEmissao(
+        sucesso=True,
+        numero_nfse=(numero_nfse or "").strip() or None,
+        codigo_verificacao=(codigo_verificacao or "").strip() or None,
+        ambiente=settings.nfse_ambiente,
+    )
+    return _gravar_log_nfse(invoice, empresa, resultado, marcada_manualmente=True)
+
+
 # =============================================================================
 # Compatibilidade: exporta tudo que o webhook_server espera
 # =============================================================================
 __all__ = [
     "emitir_nfse",
     "extrair_endereco_tomador",
+    "registrar_nfse_emitida_manual",
     "DadosServico",
     "ResultadoEmissao",
 ]

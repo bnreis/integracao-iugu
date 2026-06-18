@@ -813,6 +813,99 @@ async def emitir_nfse_manual_endpoint(invoice_id: str):
     return resultado
 
 
+class MarcarNfseEmitidaRequest(BaseModel):
+    numero_nfse: str = PydField(
+        "", description="Numero da NFS-e ja emitida (opcional, para rastreio)"
+    )
+    codigo_verificacao: str = PydField(
+        "", description="Codigo de verificacao da NFS-e ja emitida (opcional)"
+    )
+
+
+@api_router.post("/nfse/{invoice_id}/marcar-emitida")
+async def marcar_nfse_emitida_endpoint(invoice_id: str, req: MarcarNfseEmitidaRequest):
+    """Marca a fatura como JÁ tendo NFS-e emitida — sem emitir nada agora.
+
+    Cenário (fatura cancelada+recriada): a NFS-e do serviço já foi emitida por uma
+    fatura ANTERIOR. A fatura NOVA (este id) apareceria como "pendente" e poderia
+    REEMITIR ao ser paga (nota duplicada). Aqui gravamos o índice de evidência
+    `nfse_<id>.json` (marcada_manualmente=True): o painel passa a mostrar "emitida"
+    e o guardrail anti-duplicata (regra 1) BLOQUEIA a emissão automática.
+
+    Não emite no provedor nem envia e-mail. Idempotente: se a fatura já tem NF-e
+    (real ou marcada), apenas confirma.
+    """
+    _validar_invoice_id(invoice_id)
+
+    # 1) Idempotência: se já há NFS-e (emitida de verdade OU já marcada), confirma.
+    existente = _buscar_nfse_da_fatura(invoice_id)
+    if existente and existente.get("sucesso"):
+        ja_manual = bool(existente.get("marcada_manualmente"))
+        return {
+            "sucesso": True,
+            "ja_registrada": True,
+            "marcada_manualmente": ja_manual,
+            "numero_nfse": existente.get("numero_nfse"),
+            "mensagem": (
+                "Esta fatura já estava marcada como NF-e emitida."
+                if ja_manual
+                else "Esta fatura já possui NF-e emitida."
+            ),
+        }
+
+    # 2) Busca a fatura e resolve a empresa (precisa de CNPJ/razão para o índice).
+    try:
+        with IuguClient() as client:
+            invoice = client.get_invoice(invoice_id)
+    except IuguAPIError as e:
+        if e.status_code == 404:
+            raise HTTPException(404, "Fatura nao encontrada")
+        raise HTTPException(502, f"Erro ao buscar fatura: {e.message}")
+
+    repo = get_repo()
+    empresa = None
+    cid = invoice.get("customer_id")
+    if cid:
+        empresa = repo.buscar_por_customer_id(cid)
+    if empresa is None:
+        from .iugu_client import extract_cnpj_from_invoice
+        cnpj = extract_cnpj_from_invoice(invoice)
+        if cnpj:
+            empresa = repo.buscar_por_cnpj(cnpj)
+    if empresa is None:
+        raise HTTPException(404, "Empresa da fatura nao encontrada no cadastro")
+
+    # 3) Grava o índice de evidência (não emite, não envia e-mail).
+    from .nfse_df import registrar_nfse_emitida_manual
+    caminho = registrar_nfse_emitida_manual(
+        invoice,
+        empresa,
+        numero_nfse=req.numero_nfse or None,
+        codigo_verificacao=req.codigo_verificacao or None,
+    )
+    if caminho is None:
+        raise HTTPException(
+            500, "Falha ao registrar o marcador de NF-e emitida -- verifique os logs"
+        )
+
+    numero = (req.numero_nfse or "").strip()
+    logger.info(
+        f"NF-e marcada como JÁ EMITIDA (manual) p/ fatura {invoice_id} "
+        f"(empresa {empresa.cnpj}, numero={numero or '-'})."
+    )
+    return {
+        "sucesso": True,
+        "ja_registrada": False,
+        "marcada_manualmente": True,
+        "numero_nfse": numero or None,
+        "mensagem": (
+            "Fatura marcada como NF-e já emitida"
+            + (f" (nº {numero})" if numero else "")
+            + ". A emissão automática foi bloqueada para evitar duplicata."
+        ),
+    }
+
+
 @api_router.post("/nfse/{invoice_id}/reenviar")
 async def reenviar_nfse_email(invoice_id: str):
     """Reenvia o e-mail da fatura.

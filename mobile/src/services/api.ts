@@ -229,6 +229,17 @@ export async function emitirNfseManual(invoiceId: string) {
   return request("POST", `/api/nfse/${invoiceId}/emitir-manual`);
 }
 
+// Marca a fatura como JÁ tendo NF-e emitida (sem emitir agora). Usado quando a nota
+// foi emitida por uma fatura anterior (cancelada+recriada): bloqueia a reemissão.
+export async function marcarNfseEmitida(
+  invoiceId: string,
+  numeroNfse?: string
+) {
+  return request("POST", `/api/nfse/${invoiceId}/marcar-emitida`, {
+    numero_nfse: numeroNfse || "",
+  });
+}
+
 export async function reenviarNfseEmail(invoiceId: string) {
   return request("POST", `/api/nfse/${invoiceId}/reenviar`);
 }
