@@ -1,8 +1,26 @@
 # HANDOFF — Estado atual do projeto
 
-> **Para o próximo assistente:** ponto de entrada da próxima sessão. Leia na íntegra antes de responder ao Bruno. Atualizado em **06/06/2026**.
+> **Para o próximo assistente:** ponto de entrada da próxima sessão. Leia na íntegra antes de responder ao Bruno. Atualizado em **18/06/2026**.
 
 **Usuário:** Bruno Reis (bruno.reis@grupontsec.com) — admin da conta Iugu da **MEGASUPORTE SERVIÇOS DE TI LTDA** (CNPJ 36.342.291/0001-43, Brasília/DF, Simples Nacional ME/EPP, ambiente "Estabelecido").
+
+---
+
+## 🆕 Novidades desta sessão (18/06/2026)
+
+App mobile/web (Expo) em produção (APK + painel web). Mudanças deployadas:
+- **Baixa manual de fatura** (pagamento externo via Iugu `externally_pay`) + auto-emissão de NFS-e + e-mail. Status `externally_paid` é tratado como pago no fluxo de emissão.
+- **Emissão MANUAL de NFS-e em fatura ainda NÃO paga** (botão "Gerar NFS-e (manual)" na fatura pendente → `processar_pagamento(forcar_emissao=True)`; mantém lock+guardrail).
+- **ISS retido na fonte** (substituto tributário, ex.: FIPECQ): flag `iss_retido` + **Inscrição Municipal do tomador** por empresa → RPS sai com `IssRetido=1` + `ResponsavelRetencao=1` + IM do tomador. Resolve L060/E280/E039/L006. (Confirmado pela NFS-e real de abril.)
+- **Dashboard:** "NFS-e pendente" só p/ empresa com `emitir_nf=True`; "Ações necessárias" por **vencimento real** da fatura (`due_date < hoje`), não por vencimento futuro; badge **"NF-e: N/A"** p/ quem não emite.
+- **Mobile UX:** menu inferior acima da barra do Android (safe-area), **swipe** entre abas, **um único** spinner de loading, popups em linguagem de usuário.
+- 🔴 **Contorno da listagem de clientes da Iugu quebrada** (bug deles — `GET /v1/customers` retorna 1; por ID e `?query=` funcionam). Emissão resolve por `customer_id` on-demand; lista enumera por **busca (vogais)** + **registro local** (`nfse_emitidas/registro_customer_ids.json`) + `scripts/seed_customer_ids.py` (a-z). Voltou a carregar os 17. **Ver `docs/iugu_listagem_customers_contorno.md`.**
+
+**Pendências abertas:**
+1. 🗓️ **CNPJ alfanumérico (jul/2026):** adaptar validação de CNPJ (hoje exige 14 dígitos) p/ aceitar letras (string). É a próxima "adaptação" a tratar.
+2. 📩 **Abrir chamado na Iugu** sobre a listagem `/v1/customers` retornar 1 (contorno já segura a operação).
+3. 🔴 **Rotação de credenciais** (seção 8): webhook token, senha A1 (`mega10`), senha SMTP.
+4. ⚠️ **Emitir/gerar só pela VPS** (contador de RPS por máquina) + pedir mais RPS série 3 antes de esgotar 1–50.
 
 ---
 

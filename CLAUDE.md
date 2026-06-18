@@ -142,7 +142,7 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 ```
 
 **Fonte de dados de empresas: a Iugu (NÃO a planilha).** Confirmado por inspeção dos imports + execução real em 2026-05-30.
-- `src/iugu_empresas.py` — **fonte ativa em produção**. Lê todos os customers da Iugu e monta a config de negócio (`codigo_servico`, `aliquota_iss`, `emitir_nf`, etc.) a partir do campo `notes` (JSON) de cada cliente. Importado por `webhook_server`, `scheduled_invoices`, `nfse_df`, `email_nfse` e `api_routes`. **Multi-cliente:** o repositório indexa empresas por `customer_id` (chave única), não por CNPJ — um mesmo CNPJ pode ter múltiplos customers na Iugu. Use `buscar_por_customer_id()`; `buscar_por_cnpj()`/`listar_por_cnpj()` existem por compatibilidade.
+- `src/iugu_empresas.py` — **fonte ativa em produção**. Lê todos os customers da Iugu e monta a config de negócio (`codigo_servico`, `aliquota_iss`, `emitir_nf`, etc.) a partir do campo `notes` (JSON) de cada cliente. Importado por `webhook_server`, `scheduled_invoices`, `nfse_df`, `email_nfse` e `api_routes`. **Multi-cliente:** o repositório indexa empresas por `customer_id` (chave única), não por CNPJ — um mesmo CNPJ pode ter múltiplos customers na Iugu. Use `buscar_por_customer_id()`; `buscar_por_cnpj()`/`listar_por_cnpj()` existem por compatibilidade. ⚠️ Como a **listagem base da Iugu está quebrada** (retorna 1), o `carregar()` enumera por **busca (`query=`)** + **registro local** (`registro_customer_ids.json`) + resolução por ID on-demand — ver `docs/iugu_listagem_customers_contorno.md` e `scripts/seed_customer_ids.py`.
 - `src/spreadsheet.py` — **legado**. Lê `empresas_autorizadas.xlsx`. Só sobrevive em scripts utilitários (`emitir_nfse_manual`, `import_clients_from_iugu`, `test_connection`, etc.). ⚠️ O xlsx está **desatualizado e divergente da Iugu** — não use como fonte nem confie nesses scripts para dados reais.
 
 **Por que o "patch v1.01"?** A `nfelib` ainda emite XML no schema v1.00, mas o DF rejeita com E160 (Reforma Tributária mudou estrutura). `nfse_df.py` gera v1.00 e aplica 5 transformações via `lxml` para virar v1.01 válido — ver `_patch_xml_para_v101()`. Os 4 bugs específicos do schema estão tabulados em **Histórico de bugs** abaixo.
@@ -175,6 +175,8 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 - **`erpbrasil.assinatura.Certificado` espera path (string), não bytes.** Se passar bytes, ele tenta decodificar como base64 e falha silenciosamente.
 - **Cloudflared quick tunnel gera URL nova a cada reinício** — gatilho da Iugu fica órfão. Em produção (Fase 3 / VPS) não precisa: nginx + Let's Encrypt resolve.
 - **Certificado A1:** `certs/*.pfx`, válido até 2027-03-05.
+- ⚠️ **Listagem de clientes da Iugu quebrada (bug deles, desde ~18/06/2026):** `GET /v1/customers` SEM filtro retorna só 1, mas `GET /v1/customers/{id}` e `?query=<termo>` funcionam. Contorno no código: `carregar()` enumera por **busca (vogais)** + registro local (`nfse_emitidas/registro_customer_ids.json`) + busca por ID on-demand; `scripts/seed_customer_ids.py` semeia a lista completa (busca a-z). Se a lista de empresas vier incompleta, rode o seed + restart. Detalhes em `docs/iugu_listagem_customers_contorno.md`.
+- 🗓️ **CNPJ alfanumérico (Receita/Iugu, a partir de jul/2026):** validação de CNPJ hoje exige 14 **dígitos** — precisará aceitar letras (tratar como string). Adaptação pendente antes de julho/2026.
 
 ---
 
@@ -240,10 +242,11 @@ mobile/                   React Native + Expo
     └── services/         API client para o backend
 
 scripts/                  Utilitários CLI (ver "Comandos comuns" acima)
-                          + scripts de migração (migrate_*.py), auditoria, import
+                          + migração (migrate_*.py), auditoria, import
+                          + seed_customer_ids.py (semeia o registro de clientes — contorno listagem Iugu)
 docs/                     Documentação + manual oficial + XSD/exemplos
 certs/*.pfx               Certificado A1 (não commitar)
-nfse_emitidas/            XMLs enviados/recebidos + PDFs gerados
+nfse_emitidas/            XMLs enviados/recebidos + logs nfse_*.json + registro_customer_ids.json
 empresas_autorizadas.xlsx Planilha LEGADA (desatualizada; fonte real é a Iugu)
 .env                      Configurações + credenciais (não commitar)
 ```
