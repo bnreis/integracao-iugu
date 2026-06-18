@@ -385,9 +385,37 @@ class EmpresasRepository:
         """Busca empresa pelo customer_id (chave unica). None se nao existir.
 
         Retorna mesmo se inativa (para edicao/consulta direta de um departamento).
+
+        Fallback ON-DEMAND: se o customer_id nao estiver no cache, busca o customer
+        DIRETO por ID na Iugu (get_customer). Isso torna a resolucao robusta a falhas
+        da listagem /v1/customers (que ja devolveu incompleta — so 1 cliente), pois o
+        GET por ID funciona mesmo quando a listagem falha. Garante que a emissao via
+        webhook/painel sempre resolva a empresa pelo customer_id da fatura.
         """
         self.carregar()
-        return self._empresas.get(customer_id)
+        emp = self._empresas.get(customer_id)
+        if emp is not None:
+            return emp
+        if not customer_id:
+            return None
+        try:
+            with IuguClient() as client:
+                cust = client.get_customer(customer_id)
+            emp = customer_para_empresa(cust)
+            if emp and emp.customer_id:
+                self._empresas[emp.customer_id] = emp  # cacheia p/ proximas consultas
+                logger.info(
+                    f"[on-demand] Empresa resolvida por customer_id direto: "
+                    f"{emp.razao_social} ({emp.customer_id})"
+                )
+                return emp
+        except IuguAPIError as e:
+            logger.warning(
+                f"[on-demand] Falha ao buscar customer {customer_id} por ID: {e.message}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[on-demand] Erro inesperado buscando {customer_id}: {e}")
+        return None
 
 
 # ============================================================
