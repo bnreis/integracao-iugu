@@ -84,3 +84,26 @@ duas classes de risco ficam expostas:
 - `src/webhook_server.py`: importa do `nfse_guard`; `processar_pagamento` envolve guardrail+emissão+e-mail no lock.
 - `src/scheduled_invoices.py`: `_emitir_nfse_para_fatura` passa a usar o mesmo lock + guardrail.
 - `src/nfse_df.py`: `_gravar_log_nfse` com alerta elevado + fallback de índice mínimo.
+
+## Complemento (18/06/2026) — marcação manual "NF-e já emitida"
+
+**Problema:** uma fatura **cancelada+recriada** depois de já ter emitido a NFS-e. A
+fatura **nova** tem outro `invoice_id` → sem índice `nfse_<id>.json` → o painel a mostra
+como **pendente** e, ao ser paga, o guardrail (Regra 1) não acha evidência e **emitiria
+uma segunda nota** (duplicada). A Regra 2 **não** cobre o caso de forma confiável: em ISS
+retido o valor cobrado é o **líquido** (≠ bruto do log) e, entre meses, não casa.
+
+**Decisão:** ação manual, **baseada na mesma evidência**. `registrar_nfse_emitida_manual`
+(`src/nfse_df.py`) grava o índice `nfse_<invoice_id>.json` com `sucesso=true` e o flag
+**`marcada_manualmente=true`**, apontando opcionalmente para o número/código da nota de
+origem — **sem** emitir no provedor nem enviar e-mail. A partir daí a Regra 1 **bloqueia**
+a reemissão e todos os leitores (lista/detalhe/dashboard) mostram a fatura como **emitida**.
+
+- **Endpoint:** `POST /api/nfse/{invoice_id}/marcar-emitida` (idempotente — se já há nota
+  real ou marcada, apenas confirma).
+- **App/painel:** botão **"Marcar NF-e como já emitida"** no detalhe da fatura (empresa que
+  emite NF-e + fatura ainda sem nota).
+- **Por que é seguro:** decisão explícita do operador (que sabe que a nota antiga cobre o
+  serviço); reusa o mecanismo de evidência (Regra 1), sem heurística de valor/competência.
+- **Limitação aceita:** "Reenviar NF-e" numa fatura marcada-manualmente envia e-mail **sem
+  XML anexo** (o índice não tem `xml_enviado_path`). Não é o fluxo esperado dessa ação.
