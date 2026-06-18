@@ -331,8 +331,21 @@ class EmpresasRepository:
                 try:
                     start = 0
                     paginas = 0
-                    while paginas < 30:  # ~3000 faturas — folga de sobra
-                        inv = client.list_invoices(limit=100, start=start)
+                    # ⚠️ TETO BAIXO (3 páginas = 300 faturas recentes): carregar roda
+                    # DENTRO da requisição e bloqueia o worker; varrer muitas páginas
+                    # travava o app até estourar a conexão. As faturas recentes já
+                    # cobrem os clientes ativos; o resto resolve on-demand/Iugu.
+                    # Só faturas RECENTES (últimos 120 dias): cobrem os clientes
+                    # ATUAIS (que faturam no período) e evitam IDs de clientes
+                    # antigos/recriados (404). Menos páginas, menos lixo.
+                    from datetime import date as _date, timedelta as _timedelta
+                    _recente = (_date.today() - _timedelta(days=120)).isoformat()
+                    while paginas < 3:
+                        inv = client.list_invoices(
+                            limit=100,
+                            start=start,
+                            created_at_from=f"{_recente}T00:00:00-03:00",
+                        )
                         inv_items = inv.get("items", [])
                         if not inv_items:
                             break
