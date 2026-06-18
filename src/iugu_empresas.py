@@ -302,8 +302,14 @@ class EmpresasRepository:
 
         try:
             with IuguClient() as client:
-                # Passo 1: listar IDs de todos os customers
-                todos_ids: list[str] = []
+                # Passo 1: coletar os IDs de TODOS os customers.
+                # ⚠️ A listagem /v1/customers da Iugu pode vir INCOMPLETA (bug
+                # observado: devolve só 1 cliente, mesmo com ~17 na conta e o GET
+                # por ID funcionando). Por isso, além dela, coletamos os
+                # customer_id das FATURAS (list_invoices lista normalmente) — assim
+                # todo cliente com fatura entra, mesmo com a listagem quebrada.
+                ids: set[str] = set()
+
                 start = 0
                 while True:
                     result = client.list_customers(limit=100, start=start)
@@ -313,11 +319,38 @@ class EmpresasRepository:
                     for item in items:
                         cust_id = item.get("id")
                         if cust_id:
-                            todos_ids.append(cust_id)
+                            ids.add(cust_id)
                     total = result.get("totalItems", 0)
                     start += len(items)
                     if start >= total:
                         break
+
+                # Complementa com os customer_id das faturas (robusto à listagem
+                # incompleta). Teto de páginas como salvaguarda; faturas recentes
+                # vêm primeiro, então cobre os clientes ativos.
+                try:
+                    start = 0
+                    paginas = 0
+                    while paginas < 30:  # ~3000 faturas — folga de sobra
+                        inv = client.list_invoices(limit=100, start=start)
+                        inv_items = inv.get("items", [])
+                        if not inv_items:
+                            break
+                        for it in inv_items:
+                            cid = it.get("customer_id")
+                            if cid:
+                                ids.add(cid)
+                        total_inv = inv.get("totalItems", 0)
+                        start += len(inv_items)
+                        paginas += 1
+                        if start >= total_inv:
+                            break
+                except IuguAPIError as e:
+                    logger.warning(
+                        f"[CARREGAR] Falha ao coletar customer_id das faturas: {e.message}"
+                    )
+
+                todos_ids: list[str] = list(ids)
 
                 # Passo 2: buscar cada customer individualmente (traz notes).
                 # Em paralelo para reduzir o tempo total — o list_customers nao
