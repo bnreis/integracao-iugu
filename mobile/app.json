@@ -17,7 +17,7 @@
         "backgroundColor": "#1a56db"
       },
       "package": "com.megasuporte.iugonfse",
-      "versionCode": 5
+      "versionCode": 14
     },
     "web": {
       "bundler": "metro",
