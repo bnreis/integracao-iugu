@@ -12,6 +12,8 @@
 
 **Correção (commit `77ef90c`):** `verify` das chamadas httpx à ISSnet virou configurável — `_verify_ssl()` em `src/nfse_df.py` usa `settings.nfse_ca_bundle_path` (env `NFSE_CA_BUNDLE_PATH`) quando setado, senão certifi. **Nunca `verify=False`** (endpoint fiscal). Na VPS: bundle `certifi + cadeia GoDaddy da ISSnet` em `/opt/integracao-iugu/certs/issnet_ca_bundle.pem`, apontado no `.env`.
 
+**📄 Postmortem completo (sintoma, diagnóstico, correção, validação, prevenção):** `docs/incidente_tls_issnet_2026-07.md`.
+
 **⚠️ Vai repetir quando a ISSnet renovar o cert.** Para refazer o bundle (na VPS):
 ```bash
 CB=$(sudo -u iugu /opt/integracao-iugu/.venv/bin/python -m certifi)
