@@ -799,6 +799,30 @@ def _reposicionar_signature_dentro_de_rps(xml_assinado: str) -> str:
     return etree.tostring(root, encoding="unicode", xml_declaration=False)
 
 
+def _verify_ssl():
+    """Valor de `verify` para as chamadas httpx ao webservice ISSnet.
+
+    Retorna o caminho de um bundle de CA custom (`settings.nfse_ca_bundle_path`)
+    quando configurado E existente — necessário quando a ISSnet apresenta uma cadeia
+    TLS (ex.: GoDaddy TLS Root CA - R1) que o `certifi` da máquina não ancora,
+    causando "self-signed certificate in certificate chain". Caso contrário, `True`
+    (bundle padrão do certifi).
+
+    NUNCA retorna False: não desabilitamos a verificação de certificado num endpoint
+    fiscal (evita MITM). Se o bundle configurado não existir, loga aviso e cai no
+    certifi padrão.
+    """
+    bundle = (settings.nfse_ca_bundle_path or "").strip()
+    if bundle:
+        if Path(bundle).exists():
+            return bundle
+        logger.warning(
+            f"[NFS-e TLS] NFSE_CA_BUNDLE={bundle!r} não encontrado — "
+            f"usando o bundle padrão (certifi)"
+        )
+    return True
+
+
 def _enviar_soap_abrasf(envelope: str, endpoint: str) -> tuple[str, int]:
     """Envia o envelope SOAP ABRASF ao endpoint do ISSnet via httpx com mTLS.
 
@@ -843,7 +867,7 @@ def _enviar_soap_abrasf_operacao(
         with httpx.Client(
             cert=(str(cert_file), str(key_file)) if cert_file.exists() else None,
             timeout=60.0,
-            verify=True,
+            verify=_verify_ssl(),
         ) as client:
             response = client.post(
                 endpoint, content=envelope.encode("utf-8"), headers=headers
@@ -1260,7 +1284,7 @@ def baixar_pdf_nfse(url: str) -> Optional[bytes]:
         bytes do PDF se for um PDF direto; None se for HTML/outro conteúdo.
     """
     try:
-        with httpx.Client(timeout=30.0, follow_redirects=True, verify=True) as client:
+        with httpx.Client(timeout=30.0, follow_redirects=True, verify=_verify_ssl()) as client:
             resp = client.get(url)
     except Exception as exc:
         logger.warning(f"[baixar_pdf_nfse] Falha no GET de {url}: {exc}")
@@ -2213,7 +2237,7 @@ def _enviar_ao_webservice(xml_assinado: str, endpoint: str) -> tuple[str, int, s
         with httpx.Client(
             cert=(str(cert_file), str(key_file)) if cert_file.exists() else None,
             timeout=60.0,
-            verify=True,
+            verify=_verify_ssl(),
         ) as client:
             response = client.post(endpoint, content=body.encode("utf-8"), headers=headers)
 

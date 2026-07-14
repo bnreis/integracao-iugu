@@ -95,6 +95,15 @@ class Settings(BaseSettings):
         description="Caminho do certificado .pfx",
     )
     nfse_certificado_senha: str = Field("", description="Senha do certificado A1")
+    nfse_ca_bundle_path: str = Field(
+        "",
+        description=(
+            "Caminho de um bundle de CA (.pem) para VERIFICAR o certificado TLS do "
+            "webservice ISSnet. Vazio = usa o bundle padrão (certifi). Útil quando a "
+            "ISSnet apresenta uma cadeia (ex.: GoDaddy) que o certifi da máquina não "
+            "ancora — aponte para /etc/ssl/certs/ca-certificates.crt ou um bundle próprio."
+        ),
+    )
     nfse_ambiente: Literal["homologacao", "producao"] = Field(
         "homologacao", description="Ambiente NFS-e DF"
     )
