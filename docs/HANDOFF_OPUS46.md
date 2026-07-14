@@ -6,6 +6,27 @@
 
 ---
 
+## 🚨 14/07/2026 — TLS da ISSnet quebrou TODAS as emissões (resolvido)
+
+**Sintoma:** toda emissão falhava com `[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain` ao chamar `df.issnetonline.com.br`. **Não era cadastro/cliente** — era o **certificado TLS do servidor da ISSnet** (renovado ~30/06). A cadeia GoDaddy nova (`GoDaddy TLS Root CA - R1` + raiz legada `Go Daddy Class 2`) não é ancorada nem pelo `certifi` (2026.05) nem pelo bundle do SO → ambos dão `verify code 19`.
+
+**Correção (commit `77ef90c`):** `verify` das chamadas httpx à ISSnet virou configurável — `_verify_ssl()` em `src/nfse_df.py` usa `settings.nfse_ca_bundle_path` (env `NFSE_CA_BUNDLE_PATH`) quando setado, senão certifi. **Nunca `verify=False`** (endpoint fiscal). Na VPS: bundle `certifi + cadeia GoDaddy da ISSnet` em `/opt/integracao-iugu/certs/issnet_ca_bundle.pem`, apontado no `.env`.
+
+**⚠️ Vai repetir quando a ISSnet renovar o cert.** Para refazer o bundle (na VPS):
+```bash
+CB=$(sudo -u iugu /opt/integracao-iugu/.venv/bin/python -m certifi)
+echo | openssl s_client -connect df.issnetonline.com.br:443 -servername df.issnetonline.com.br -showcerts 2>/dev/null \
+ | awk '/-----BEGIN CERTIFICATE-----/{f=1} f{print} /-----END CERTIFICATE-----/{f=0}' > /tmp/issnet_chain.pem
+cat "$CB" /tmp/issnet_chain.pem | sudo tee /opt/integracao-iugu/certs/issnet_ca_bundle.pem >/dev/null
+sudo chown iugu:iugu /opt/integracao-iugu/certs/issnet_ca_bundle.pem
+# valide: openssl ... -CAfile /opt/integracao-iugu/certs/issnet_ca_bundle.pem  → verify return code: 0 (ok)
+sudo systemctl restart iugu-webhook
+```
+
+**🔴 Pendência:** faturas pagas de ~30/06 a 14/07 que deveriam ter gerado NFS-e **não geraram** (ex.: KEMMI PHARMA visto no log). Auditar pagas sem NFS-e no período e emitir manualmente (respeitando o guardrail 1/mês).
+
+---
+
 ## 🆕 Novidades desta sessão (18/06/2026)
 
 App mobile/web (Expo) em produção (APK + painel web). Mudanças deployadas:
