@@ -10,7 +10,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from "react-native";
-import { login } from "../services/api";
+import { login, getTenants, getEmpresaAtivaId, setEmpresaAtiva } from "../services/api";
 
 interface Props {
   onLoginSuccess: () => void;
@@ -20,7 +20,9 @@ export default function LoginScreen({ onLoginSuccess }: Props) {
   const [usuario, setUsuario] = useState("");
   const [senha, setSenha] = useState("");
   const [loading, setLoading] = useState(false);
+  const [empresaId, setEmpresaId] = useState(getEmpresaAtivaId());
   const senhaRef = useRef<TextInput>(null);
+  const empresas = getTenants();
 
   const alertMsg = (titulo: string, mensagem: string) => {
     if (Platform.OS === "web") {
@@ -37,6 +39,9 @@ export default function LoginScreen({ onLoginSuccess }: Props) {
     }
     setLoading(true);
     try {
+      // Define a empresa selecionada ANTES de logar: o login (e todo o resto)
+      // passa a falar com o backend daquela empresa.
+      await setEmpresaAtiva(empresaId);
       const result = await login(usuario.trim(), senha);
       if (result.success) {
         onLoginSuccess();
@@ -57,7 +62,32 @@ export default function LoginScreen({ onLoginSuccess }: Props) {
     >
       <View style={styles.card}>
         <Text style={styles.title}>Iugu NFS-e</Text>
-        <Text style={styles.subtitle}>MEGASUPORTE TI</Text>
+        <Text style={styles.subtitle}>Selecione a empresa e entre</Text>
+
+        {/* Seletor de empresa (ADR-0007): define qual backend/dados serão usados. */}
+        <Text style={styles.label}>Empresa</Text>
+        <View style={styles.empresaRow}>
+          {empresas.map((emp) => {
+            const ativo = emp.id === empresaId;
+            return (
+              <TouchableOpacity
+                key={emp.id}
+                style={[styles.empresaChip, ativo && styles.empresaChipAtivo]}
+                onPress={() => setEmpresaId(emp.id)}
+                disabled={loading}
+              >
+                <Text
+                  style={[
+                    styles.empresaChipText,
+                    ativo && styles.empresaChipTextAtivo,
+                  ]}
+                >
+                  {emp.nome}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
 
         <TextInput
           style={styles.input}
@@ -131,6 +161,38 @@ const styles = StyleSheet.create({
     color: "#6b7280",
     textAlign: "center",
     marginBottom: 28,
+  },
+  label: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#6b7280",
+    marginBottom: 8,
+  },
+  empresaRow: {
+    flexDirection: "row",
+    gap: 10,
+    marginBottom: 18,
+  },
+  empresaChip: {
+    flex: 1,
+    borderWidth: 1.5,
+    borderColor: "#d1d5db",
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    backgroundColor: "#f9fafb",
+  },
+  empresaChipAtivo: {
+    borderColor: "#1a56db",
+    backgroundColor: "#eff4ff",
+  },
+  empresaChipText: {
+    fontSize: 15,
+    fontWeight: "600",
+    color: "#6b7280",
+  },
+  empresaChipTextAtivo: {
+    color: "#1a56db",
   },
   input: {
     borderWidth: 1,

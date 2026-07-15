@@ -22,7 +22,44 @@ const BASE_URL = IS_WEB ? "" : "https://iugu.megasuporte.com";
 // Mantém um cache em memória (`_token`) para que `request()` continue
 // síncrono no caminho quente; a persistência é assíncrona.
 // ============================================================
-const TOKEN_KEY = "auth_token";
+// ============================================================
+// Multi-empresa (ADR-0007) — mesmo domínio, roteado por PREFIXO de caminho.
+//   MegaSuporte -> ""          (backend :8000)
+//   MegaTeam    -> "/megateam" (backend :8001, via Apache)
+// Cada empresa tem seu próprio token (mesmo login nas duas). Selecionar a empresa
+// = trocar o prefixo das URLs + o token ativo. Ao adicionar empresa nova, basta
+// incluir aqui e subir a instância correspondente.
+// ============================================================
+export interface Tenant {
+  id: string;
+  nome: string;
+  prefixo: string; // prefixo de caminho no mesmo domínio
+}
+
+// "Tenant" = nossa empresa emissora (MegaSuporte/MegaTeam). NÃO confundir com as
+// "empresas" do domínio (os clientes que faturamos, em getEmpresas()).
+export const TENANTS: Tenant[] = [
+  { id: "megasuporte", nome: "MegaSuporte", prefixo: "" },
+  { id: "megateam", nome: "MegaTeam", prefixo: "/megateam" },
+];
+
+const EMPRESA_KEY = "empresa_ativa";
+let _empresaId: string = TENANTS[0].id;
+
+export function getTenants(): Tenant[] {
+  return TENANTS;
+}
+export function getEmpresaAtiva(): Tenant {
+  return TENANTS.find((e) => e.id === _empresaId) || TENANTS[0];
+}
+export function getEmpresaAtivaId(): string {
+  return _empresaId;
+}
+
+// Chave de token POR empresa (mantém as duas sessões em paralelo).
+function tokenKey(id: string = _empresaId): string {
+  return `auth_token_${id}`;
+}
 
 let _token: string | null = null;
 
@@ -30,49 +67,63 @@ function getToken(): string | null {
   return _token;
 }
 
-// Persiste o token no storage seguro da plataforma. Assíncrono.
+// Storage multiplataforma (web: localStorage | nativo: SecureStore).
+async function _persist(key: string, val: string): Promise<void> {
+  try {
+    if (Platform.OS === "web") window.localStorage.setItem(key, val);
+    else await SecureStore.setItemAsync(key, val);
+  } catch (err) {
+    console.warn(`persist(${key}): falha`, err);
+  }
+}
+async function _read(key: string): Promise<string | null> {
+  try {
+    if (Platform.OS === "web") return window.localStorage.getItem(key);
+    return await SecureStore.getItemAsync(key);
+  } catch (err) {
+    console.warn(`read(${key}): falha`, err);
+    return null;
+  }
+}
+async function _remove(key: string): Promise<void> {
+  try {
+    if (Platform.OS === "web") window.localStorage.removeItem(key);
+    else await SecureStore.deleteItemAsync(key);
+  } catch (err) {
+    console.warn(`remove(${key}): falha`, err);
+  }
+}
+
+// Define a empresa ativa, persiste e carrega o token dela (se já houver sessão).
+// Retorna true se já existe token válido em cache para a empresa selecionada.
+export async function setEmpresaAtiva(id: string): Promise<boolean> {
+  if (!TENANTS.some((e) => e.id === id)) return false;
+  _empresaId = id;
+  await _persist(EMPRESA_KEY, id);
+  _token = await _read(tokenKey(id));
+  return !!_token;
+}
+
+// Persiste o token da EMPRESA ATIVA.
 async function saveToken(token: string): Promise<void> {
   _token = token;
-  try {
-    if (Platform.OS === "web") {
-      window.localStorage.setItem(TOKEN_KEY, token);
-    } else {
-      await SecureStore.setItemAsync(TOKEN_KEY, token);
-    }
-  } catch (err) {
-    // Se a persistência falhar, segue só com o cache em memória (não derruba o login).
-    console.warn("saveToken: falha ao persistir token", err);
-  }
+  await _persist(tokenKey(), token);
 }
 
-// Remove o token da memória e do storage. Assíncrono.
+// Remove o token só da empresa ativa (as outras sessões permanecem).
 async function clearToken(): Promise<void> {
+  const k = tokenKey();
   _token = null;
-  try {
-    if (Platform.OS === "web") {
-      window.localStorage.removeItem(TOKEN_KEY);
-    } else {
-      await SecureStore.deleteItemAsync(TOKEN_KEY);
-    }
-  } catch (err) {
-    // Limpeza best-effort: o cache em memória já foi zerado acima.
-    console.warn("clearToken: falha ao remover token do storage", err);
-  }
+  await _remove(k);
 }
 
-// Hidrata o cache em memória a partir do storage persistido.
-// Chamado no boot do app (App.tsx) para restaurar a sessão após reload/F5.
+// Hidrata empresa ativa + token no boot (App.tsx), restaurando a sessão após reload/F5.
 export async function hydrateToken(): Promise<boolean> {
-  try {
-    if (Platform.OS === "web") {
-      _token = window.localStorage.getItem(TOKEN_KEY);
-    } else {
-      _token = await SecureStore.getItemAsync(TOKEN_KEY);
-    }
-  } catch (err) {
-    console.warn("hydrateToken: falha ao ler token do storage", err);
-    _token = null;
+  const savedEmpresa = await _read(EMPRESA_KEY);
+  if (savedEmpresa && TENANTS.some((e) => e.id === savedEmpresa)) {
+    _empresaId = savedEmpresa;
   }
+  _token = await _read(tokenKey());
   return !!_token;
 }
 
@@ -104,7 +155,9 @@ async function request<T = any>(
   }
 
   try {
-    const response = await fetch(`${BASE_URL}${path}`, {
+    // Roteia por empresa: mesmo domínio, prefixo de caminho (ex.: "/megateam").
+    const prefixo = getEmpresaAtiva().prefixo;
+    const response = await fetch(`${BASE_URL}${prefixo}${path}`, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,

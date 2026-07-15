@@ -12,17 +12,13 @@ subdomínio e cron **próprios**.
 | Diretório | `/opt/integracao-iugu` | `/opt/integracao-iugu-megateam` |
 | Serviço systemd | `iugu-webhook` | `iugu-webhook-megateam` |
 | Porta uvicorn (local) | 8000 | **8001** |
-| Subdomínio | `iugu.megasuporte.com` | **`megateam.megasuporte.com`** |
+| Acesso (MESMO domínio) | `iugu.megasuporte.com` `/api/…` | `iugu.megasuporte.com` **`/megateam/api/…`** |
 | Pasta de NFS-e/RPS | `/opt/integracao-iugu/nfse_emitidas` | `/opt/integracao-iugu-megateam/nfse_emitidas` |
 
----
+> **Mesmo domínio** (decisão 2026-07-14): **sem subdomínio, sem DNS novo, sem certbot novo**.
+> O Apache roteia por **caminho** `/megateam/…` para a instância da MegaTeam.
 
-## Pré-requisito: DNS
-Antes do `certbot`, crie um **registro A** `megateam.megasuporte.com → 72.62.11.230`
-(mesmo IP da VPS). Confirme a propagação:
-```bash
-dig +short megateam.megasuporte.com    # deve responder 72.62.11.230
-```
+---
 
 ## 1) Clonar o código + venv (usuário `iugu`)
 ```bash
@@ -59,7 +55,7 @@ IUGU_WEBHOOK_TOKEN=<GERAR_NOVO_TOKEN_WEBHOOK>
 API_USUARIO=<mesmo_usuario_atual>
 API_SENHA=<mesma_senha_atual>
 API_JWT_SECRET=<gerar_proprio: python -c "import secrets;print(secrets.token_hex(32))">
-CORS_ORIGINS=https://megateam.megasuporte.com
+CORS_ORIGINS=https://iugu.megasuporte.com
 
 # --- NFS-e DF (prestador MegaTeam) ---
 NFSE_PADRAO=abrasf204
@@ -107,46 +103,42 @@ sudo systemctl status iugu-webhook-megateam --no-pager | head -5
 curl -s http://127.0.0.1:8001/health
 ```
 
-## 5) Apache vhost + HTTPS
-`/etc/apache2/sites-available/iugu-megateam.conf`:
+## 5) Apache — roteamento por caminho no vhost EXISTENTE (sem subdomínio/cert novo)
+A MegaTeam entra no **mesmo domínio** via caminho `/megateam/…`. **Não** cria vhost novo —
+adiciona regras de proxy ao vhost **:443** já existente da MegaSuporte (o que o certbot gerou,
+ex.: `/etc/apache2/sites-available/iugu-megasuporte-le-ssl.conf`).
+
+Dentro do `<VirtualHost *:443>` de `iugu.megasuporte.com`, **antes** das regras `/api/` atuais,
+adicione (a ordem importa — o prefixo mais específico primeiro):
 ```apache
-<VirtualHost *:80>
-    ServerName megateam.megasuporte.com
-    DocumentRoot /opt/integracao-iugu-megateam/web-build
-
-    ProxyPreserveHost On
-    ProxyPass        /api/     http://127.0.0.1:8001/api/
-    ProxyPassReverse /api/     http://127.0.0.1:8001/api/
-    ProxyPass        /webhook/ http://127.0.0.1:8001/webhook/
-    ProxyPassReverse /webhook/ http://127.0.0.1:8001/webhook/
-    ProxyPass        /health   http://127.0.0.1:8001/health
-    ProxyPassReverse /health   http://127.0.0.1:8001/health
-
-    <Directory /opt/integracao-iugu-megateam/web-build>
-        Require all granted
-        FallbackResource /index.html
-    </Directory>
-
-    ErrorLog  ${APACHE_LOG_DIR}/iugu_megateam_error.log
-    CustomLog ${APACHE_LOG_DIR}/iugu_megateam_access.log combined
-</VirtualHost>
+    # --- MegaTeam (2ª instância, porta 8001) ---
+    # Cobrir TODOS os prefixos que o app usa: /auth (login) e /api, além de
+    # /webhook (gatilho Iugu) e /health. Sem /megateam/auth, o login quebra.
+    ProxyPass        /megateam/auth/    http://127.0.0.1:8001/auth/
+    ProxyPassReverse /megateam/auth/    http://127.0.0.1:8001/auth/
+    ProxyPass        /megateam/api/     http://127.0.0.1:8001/api/
+    ProxyPassReverse /megateam/api/     http://127.0.0.1:8001/api/
+    ProxyPass        /megateam/webhook/ http://127.0.0.1:8001/webhook/
+    ProxyPassReverse /megateam/webhook/ http://127.0.0.1:8001/webhook/
+    ProxyPass        /megateam/health   http://127.0.0.1:8001/health
+    ProxyPassReverse /megateam/health   http://127.0.0.1:8001/health
 ```
+> O painel web (SPA) continua sendo servido **uma vez** no root pela instância atual — o
+> mesmo app serve as duas empresas (o seletor troca o prefixo). Não precisa de `web-build`
+> nem `DocumentRoot` para a MegaTeam.
+
 ```bash
-sudo -u iugu mkdir -p /opt/integracao-iugu-megateam/web-build
-echo "ok" | sudo -u iugu tee /opt/integracao-iugu-megateam/web-build/index.html >/dev/null
-sudo a2ensite iugu-megateam
-sudo apache2ctl configtest       # valida ANTES
-sudo apache2ctl -S               # confere que megateam NÃO virou vhost default
-sudo systemctl reload apache2
-sudo certbot --apache -d megateam.megasuporte.com
+sudo apache2ctl configtest       # valida ANTES de aplicar
+sudo systemctl reload apache2    # gracioso, não derruba o Apache
 ```
 
 ## 6) Gatilho (webhook) na Iugu da MegaTeam
-No painel da Iugu **da conta MegaTeam**, aponte o gatilho de `invoice.status_changed` para:
+No painel da Iugu **da conta MegaTeam**, aponte o gatilho de `invoice.status_changed` para o
+**caminho `/megateam`** no mesmo domínio:
 ```
-https://megateam.megasuporte.com/webhook/iugu?token=<IUGU_WEBHOOK_TOKEN_do_.env>
+https://iugu.megasuporte.com/megateam/webhook/iugu?token=<IUGU_WEBHOOK_TOKEN_do_.env>
 ```
-(confirme o caminho/param exato do webhook conforme o da MegaSuporte).
+(confirme o caminho/param exato do webhook conforme o da MegaSuporte, só prefixando `/megateam`).
 
 ## 7) Cron de boletos recorrentes (MegaTeam)
 ```bash
@@ -156,8 +148,9 @@ sudo -u iugu crontab -e -u iugu
 ```
 
 ## 8) Validação final
-- `curl -s https://megateam.megasuporte.com/health` → OK
-- Login no painel/app com o **mesmo usuário** → ver dados **da MegaTeam** (vazio no início).
+- `curl -s https://iugu.megasuporte.com/megateam/health` → OK
+- Login no painel/app com o **mesmo usuário**, selecionando **MegaTeam** → ver dados da
+  MegaTeam (vazio no início).
 - Importar clientes (script `importar_clientes_entre_contas.py`, dry-run primeiro).
 - Emissão de teste R$1 (fatura → paga → NFS-e → e-mail), respeitando o guardrail.
 

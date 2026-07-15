@@ -1,6 +1,10 @@
 # ADR-0007 — Suporte a múltiplas empresas via DUAS INSTÂNCIAS + seletor no login
 
 - **Status:** Aceito (decisão do Bruno em 2026-07-14) — implementação em fases.
+- **Atualização 2026-07-14:** por decisão do Bruno, **mesmo domínio** (`iugu.megasuporte.com`),
+  sem subdomínio novo. As duas instâncias convivem atrás do **mesmo domínio, roteadas por
+  CAMINHO** no Apache (`/api/…` → MegaSuporte:8000, `/megateam/api/…` → MegaTeam:8001). O
+  resto do ADR (duas instâncias isoladas, núcleo fiscal intocado) permanece.
 - **Contexto:** o sistema hoje é **mono-empresa** (MegaSuporte). Entra a **MegaTeam**
   (CNPJ 27.987.745/0001-42), com **conta Iugu própria** e **certificado A1 próprio**.
 - **Relação:** não altera ADR-0005 (dual ABRASF/nacional) nem ADR-0006 (guardrail) —
@@ -33,8 +37,9 @@ de empresa é grande e arriscado.
   certificado A1, senha, dados de prestador, `NFSE_OUTPUT_DIR` (contador de RPS/evidência),
   `NFSE_CA_BUNDLE_PATH`, cron de boletos. **Zero mudança no core** — o mesmo código, dois
   `.env`.
-- Cada instância atrás de **seu subdomínio** (Apache vhost): a atual `iugu.megasuporte.com`
-  (MegaSuporte) + um novo (ex.: `megateam.megasuporte.com`) para a MegaTeam.
+- **Mesmo domínio** (`iugu.megasuporte.com`), roteado por **CAMINHO** no Apache: `/api/…`
+  e `/webhook/…` → MegaSuporte (8000); `/megateam/api/…` e `/megateam/webhook/…` → MegaTeam
+  (8001). Sem subdomínio/DNS/cert novo — só regras de proxy no vhost já existente.
 - **Frontend (app + painel)** ganha um **seletor de empresa**. Como o usuário é o mesmo
   (mesmas credenciais nas duas instâncias), o app mantém um **mapa empresa → baseUrl** e,
   ao selecionar/alternar, autentica de forma transparente contra o backend daquela empresa
@@ -44,11 +49,13 @@ de empresa é grande e arriscado.
                     ┌─────────────────────────────┐
    App/Painel ──────┤ seletor: [MegaSuporte ▾]     │
    (mesmo login)    └───────────┬─────────────────┘
-                                │ baseUrl da empresa selecionada
+                                │ prefixo de caminho da empresa selecionada
+                                ▼
+                   iugu.megasuporte.com  (Apache, mesmo domínio)
               ┌─────────────────┴──────────────────┐
+       /api/…, /webhook/…                 /megateam/api/…, /megateam/webhook/…
               ▼                                     ▼
-   iugu.megasuporte.com                  megateam.megasuporte.com
-   (systemd iugu-webhook)                (systemd iugu-webhook-megateam)
+   :8000 (systemd iugu-webhook)          :8001 (systemd iugu-webhook-megateam)
    .env MegaSuporte:                     .env MegaTeam:
     IUGU_API_TOKEN / cert / IM            IUGU_API_TOKEN / cert / IM  (próprios)
     NFSE_OUTPUT_DIR próprio               NFSE_OUTPUT_DIR próprio
@@ -70,22 +77,24 @@ empresas crescer muito, reavaliar a migração para multi-tenant.
 - Fluxo da MegaSuporte **intocado** (a 2ª instância é aditiva).
 - Isolamento **forte** por natureza: dados, logs, contador de RPS, guardrail (1 nota/mês) e
   credenciais totalmente separados — sem risco de "vazar" nota de uma empresa na outra.
-- Webhooks triviais: cada conta Iugu aponta o gatilho para o **subdomínio da sua instância**
-  (nada de rotear por account_id no código).
+- Webhooks triviais: cada conta Iugu aponta o gatilho para o **caminho da sua instância** no
+  mesmo domínio (`/webhook/…` vs `/megateam/webhook/…`) — nada de rotear por account_id no código.
 
 **Limitações / riscos aceitos**
 - **Infra duplicada** na VPS (2º systemd + vhost + cron + certificado). A VPS é compartilhada
   (Asterisk/Apache/MariaDB) — seguir o runbook (`docs/deploy_vps.md`) sem mexer em firewall/
   fuso/`apt upgrade`; só **adicionar** unit e vhost.
 - Atualização de código passa a exigir `git pull`+restart **nas duas** instâncias.
-- Painel **web**: como cada empresa tem seu subdomínio (CORS restrito), o seletor no web
-  troca de subdomínio (redireciona); no **app nativo** a troca é in-app (baseUrl absoluta).
+- Painel **web** e **app nativo**: o seletor troca o **prefixo de caminho** (`""` vs
+  `/megateam`) na mesma origem — sem CORS extra, sem trocar de domínio. Cada empresa tem seu
+  token (mesmo login nas duas), então alternar é só trocar prefixo + token.
 
 ## Plano em fases
 
 1. **Infra MegaTeam (VPS):** clonar o serviço, `.env` próprio (token Iugu + certificado A1 +
    prestador MegaTeam + `NFSE_OUTPUT_DIR` próprio + `NFSE_CA_BUNDLE_PATH`), systemd unit,
-   vhost/subdomínio + HTTPS, cron. Validar com `scripts/test_connection.py`.
+   regras de proxy por caminho (`/megateam/…` → :8001) no vhost já existente (sem DNS/cert),
+   cron. Validar com `scripts/test_connection.py`.
 2. **Importar clientes** MegaSuporte → Iugu MegaTeam (`scripts/importar_clientes_entre_contas.py`,
    idempotente, `--dry-run` primeiro).
 3. **Seletor de empresa** no app/painel (login mantém, alterna baseUrl+token por empresa).
@@ -97,4 +106,4 @@ empresas crescer muito, reavaliar a migração para multi-tenant.
 - **Certificado A1 `.pfx` da MegaTeam** (arquivo em `certs/`) + **senha** (só no `.env`).
 - **Dados de prestador MegaTeam:** Inscrição Municipal (CF/DF), série RPS, código do
   município, alíquota/código de serviço padrão (se diferentes da MegaSuporte).
-- **Subdomínio** desejado para a MegaTeam (ex.: `megateam.megasuporte.com`).
+- (Subdomínio dispensado — mesmo domínio via caminho `/megateam`.)
