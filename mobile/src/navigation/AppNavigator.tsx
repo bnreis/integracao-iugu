@@ -11,6 +11,7 @@ import DashboardScreen from "../screens/DashboardScreen";
 import FaturasScreen from "../screens/FaturasScreen";
 import EmpresasScreen from "../screens/EmpresasScreen";
 import CadastrarEmpresaScreen from "../screens/CadastrarEmpresaScreen";
+import ContaMenu from "../components/ContaMenu";
 
 const Tab = createBottomTabNavigator();
 const EmpresasStackNav = createNativeStackNavigator();
@@ -94,7 +95,12 @@ function EmpresasStack() {
 
 const EmpresasComSwipe = comSwipeAbas(EmpresasStack, 2);
 
-export default function AppNavigator() {
+interface AppNavigatorProps {
+  onSwitch: (id: string) => void;
+  onLogout: () => void;
+}
+
+export default function AppNavigator({ onSwitch, onLogout }: AppNavigatorProps) {
   // Insets do dispositivo: insets.bottom = altura da barra de navegação do
   // Android (gestos/botões). Somamos ao menu para ele não ficar por baixo dela.
   const insets = useSafeAreaInsets();
@@ -108,6 +114,8 @@ export default function AppNavigator() {
         },
         headerTintColor: "#fff",
         headerTitleStyle: { fontWeight: "600", fontSize: 17 },
+        // Menu de conta (trocar empresa / sair) no cabeçalho das abas.
+        headerRight: () => <ContaMenu onSwitch={onSwitch} onLogout={onLogout} />,
         tabBarActiveTintColor: "#1a56db",
         tabBarInactiveTintColor: "#9ca3af",
         tabBarStyle: {

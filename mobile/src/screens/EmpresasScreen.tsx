@@ -688,6 +688,13 @@ const styles = StyleSheet.create({
     textAlign: "right",
     flexShrink: 1,
   },
+  toggleSectionTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#6b7280",
+    marginBottom: 10,
+    textTransform: "uppercase",
+  },
   actionsSection: { marginTop: 16 },
   actionsRow: {
     flexDirection: "column",

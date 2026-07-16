@@ -6,13 +6,35 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import LoginScreen from "./screens/LoginScreen";
 import AppNavigator from "./navigation/AppNavigator";
-import { hydrateToken } from "./services/api";
+import {
+  hydrateToken,
+  getEmpresaAtivaId,
+  setEmpresaAtiva,
+  logout,
+} from "./services/api";
 
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
   // Começa carregando: precisamos consultar o storage persistido antes de
   // decidir entre Login e app (no boot a memória começa vazia).
   const [hidratando, setHidratando] = useState(true);
+  // Empresa ativa (ADR-0007). Serve de `key` do AppNavigator: ao trocar de
+  // empresa, o navigator remonta e todas as telas recarregam com os dados dela.
+  const [empresaId, setEmpresaId] = useState(getEmpresaAtivaId());
+
+  // Troca de empresa SEM deslogar: se já houver sessão (token) na empresa
+  // destino, remonta as telas com os dados dela; senão, vai pro login já
+  // pré-selecionado naquela empresa.
+  const trocarEmpresa = async (id: string) => {
+    const temToken = await setEmpresaAtiva(id);
+    setEmpresaId(id);
+    if (!temToken) setLoggedIn(false);
+  };
+
+  const sair = async () => {
+    await logout();
+    setLoggedIn(false);
+  };
 
   useEffect(() => {
     // Restaura a sessão a partir do token persistido (SecureStore no nativo,
@@ -38,11 +60,20 @@ export default function App() {
       </View>
     );
   } else if (!loggedIn) {
-    content = <LoginScreen onLoginSuccess={() => setLoggedIn(true)} />;
+    content = (
+      <LoginScreen
+        onLoginSuccess={() => {
+          // A empresa pode ter sido trocada no seletor do login.
+          setEmpresaId(getEmpresaAtivaId());
+          setLoggedIn(true);
+        }}
+      />
+    );
   } else {
     content = (
       <NavigationContainer>
-        <AppNavigator />
+        {/* key={empresaId}: trocar de empresa remonta o navigator → telas recarregam. */}
+        <AppNavigator key={empresaId} onSwitch={trocarEmpresa} onLogout={sair} />
       </NavigationContainer>
     );
   }
