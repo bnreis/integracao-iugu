@@ -104,10 +104,27 @@ export async function setEmpresaAtiva(id: string): Promise<boolean> {
   return !!_token;
 }
 
-// Persiste o token da EMPRESA ATIVA.
-async function saveToken(token: string): Promise<void> {
-  _token = token;
-  await _persist(tokenKey(), token);
+// Autentica numa empresa ESPECÍFICA (usando o prefixo dela), sem depender da
+// empresa ativa. Usado no login para autenticar em TODAS as empresas de uma vez.
+// Retorna o access_token ou null (best-effort: falha numa empresa não derruba as outras).
+async function _loginTenant(
+  tenant: Tenant,
+  usuario: string,
+  senha: string
+): Promise<string | null> {
+  try {
+    const resp = await fetch(`${BASE_URL}${tenant.prefixo}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ usuario, senha }),
+      cache: "no-store",
+    });
+    const data = await resp.json().catch(() => null);
+    if (resp.ok && data?.access_token) return data.access_token as string;
+  } catch {
+    // erro de rede nessa empresa — trata como falha (só a ativa decide o login).
+  }
+  return null;
 }
 
 // Remove o token só da empresa ativa (as outras sessões permanecem).
@@ -194,17 +211,22 @@ export async function login(
   usuario: string,
   senha: string
 ): Promise<{ success: boolean; error?: string }> {
-  const res = await request(
-    "POST",
-    "/auth/login",
-    { usuario, senha },
-    false
-  );
-  if (res.data?.access_token) {
-    await saveToken(res.data.access_token);
+  // Loga em TODAS as empresas com as MESMAS credenciais e guarda o token de cada
+  // uma → trocar de empresa depois é INSTANTÂNEO (sem novo login). A empresa ativa
+  // (selecionada no login) decide sucesso/erro; as demais são best-effort (se o
+  // backend de uma estiver fora, ela fica sem token e só pedirá login ao ser aberta).
+  const alvo = getEmpresaAtivaId();
+  let tokenAlvo: string | null = null;
+  for (const t of TENANTS) {
+    const tok = await _loginTenant(t, usuario, senha);
+    if (tok) await _persist(tokenKey(t.id), tok);
+    if (t.id === alvo) tokenAlvo = tok;
+  }
+  if (tokenAlvo) {
+    _token = tokenAlvo;
     return { success: true };
   }
-  return { success: false, error: res.error || "Falha no login" };
+  return { success: false, error: "Usuário ou senha inválidos" };
 }
 
 export async function logout(): Promise<void> {
