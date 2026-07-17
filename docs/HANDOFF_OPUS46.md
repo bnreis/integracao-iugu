@@ -6,6 +6,29 @@
 
 ---
 
+## 🆕 17/07/2026 — MULTI-EMPRESA no ar (MegaSuporte + MegaTeam) — ADR-0007
+
+Segunda empresa **MegaTeam** (CNPJ 27.987.745/0001-42) rodando ao lado da MegaSuporte, no **mesmo domínio** (`iugu.megasuporte.com`), roteado por **caminho** no Apache.
+
+**Arquitetura (ADR-0007):** duas instâncias isoladas do backend, **núcleo fiscal intocado**.
+- MegaSuporte → `/opt/integracao-iugu`, systemd `iugu-webhook`, porta **8000**, rotas `/api /auth /webhook /health`.
+- MegaTeam → `/opt/integracao-iugu-megateam`, systemd `iugu-webhook-megateam`, porta **8001**, rotas `/megateam/api ...`. `.env` próprio (token Iugu, A1 `certs/megateam.pfx`, IM `0781513100130`, **série RPS 3**, `NFSE_OUTPUT_DIR` próprio). Contador RPS semeado em **36** (última nota emitida) → próxima = 37. Faixa 1–50 (pedir mais em breve).
+- App/painel: **seletor de empresa** (login + menu no cabeçalho `ContaMenu`); login autentica nas duas empresas e guarda os dois tokens; na web a troca recarrega a página. APK **vcode 20**.
+- Backend: **`Cache-Control: no-store`** em toda resposta (`webhook_server`) — higiene anti-cache.
+- Clientes replicados p/ o Iugu da MegaTeam: `scripts/importar_clientes_entre_contas.py` (17 criados).
+
+**🔴 Incidente resolvido (mesma data):** o painel mostrava dados de UMA empresa para as duas. Causa = **rota do Apache**: `/api /auth /webhook /health` apontavam pro **8001** (MegaTeam) em vez do **8000**, corrompidas em edição manual do vhost. **Lição:** testar pelo **domínio público** (não localhost) e conferir **todas** as linhas `ProxyPass`. **Postmortem: `docs/incidente_multiempresa_apache_2026-07.md`.**
+
+**Pendências abertas (multi-empresa):**
+1. 🔴 **Backfill webhooks MegaSuporte** (~16/07 17:45 → 17/07): webhooks foram pro 8001 (rejeitados) → conferir pagos sem NFS-e e emitir (guardrail impede duplicata).
+2. **Gatilho da MegaTeam** na Iugu → `https://iugu.megasuporte.com/megateam/webhook/iugu?token=<IUGU_WEBHOOK_TOKEN>`.
+3. 🔴 **Excluir o token vazado** da MegaTeam na Iugu (o antigo `C69906999...`, vazou no chat — já rotacionado no `.env`, falta apagar na Iugu).
+4. **Faturamento recorrente / cobrança dupla:** os 17 clientes foram importados com `dia_criacao_fatura`/`valor_fatura`. **NÃO ligar o cron da MegaTeam** até decidir quais clientes ela fatura (senão gera boleto+NFS-e em duplicidade com a MegaSuporte).
+5. **Emissão de teste R$1** na MegaTeam (ponta a ponta).
+6. Purge do Cloudflare + WARP (o `no-store` já impede novo cache).
+
+---
+
 ## 🚨 14/07/2026 — TLS da ISSnet quebrou TODAS as emissões (resolvido)
 
 **Sintoma:** toda emissão falhava com `[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain` ao chamar `df.issnetonline.com.br`. **Não era cadastro/cliente** — era o **certificado TLS do servidor da ISSnet** (renovado ~30/06). A cadeia GoDaddy nova (`GoDaddy TLS Root CA - R1` + raiz legada `Go Daddy Class 2`) não é ancorada nem pelo `certifi` (2026.05) nem pelo bundle do SO → ambos dão `verify code 19`.

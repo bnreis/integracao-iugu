@@ -132,6 +132,28 @@ sudo apache2ctl configtest       # valida ANTES de aplicar
 sudo systemctl reload apache2    # gracioso, não derruba o Apache
 ```
 
+> 🔴 **OBRIGATÓRIO após editar o vhost — confira o destino de TODAS as linhas** (uma edição
+> manual já apontou as rotas da MegaSuporte pro 8001 por engano — ver
+> `docs/incidente_multiempresa_apache_2026-07.md`):
+> ```bash
+> sudo grep -n ProxyPass /etc/apache2/sites-available/iugu-megasuporte-le-ssl.conf
+> ```
+> Esperado: `/api /auth /webhook /health` → **:8000** · `/megateam/*` → **:8001**.
+> E valide **pelo domínio público** (não localhost) — deve devolver dados **diferentes**:
+> ```bash
+> sudo -u iugu /opt/integracao-iugu/.venv/bin/python - <<'PY'
+> import httpx
+> from dotenv import dotenv_values
+> c = dotenv_values("/opt/integracao-iugu/.env")
+> for nome, px in [("MEGASUPORTE",""),("MEGATEAM","/megateam")]:
+>     b=f"https://iugu.megasuporte.com{px}"
+>     t=httpx.post(f"{b}/auth/login",json={"usuario":c["API_USUARIO"],"senha":c["API_SENHA"]},timeout=30).json()["access_token"]
+>     d=httpx.get(f"{b}/api/dashboard",headers={"Authorization":f"Bearer {t}"},timeout=60).json()
+>     print(nome, d["mes"]["valor_pago"], d["mes"]["criadas"])
+> PY
+> ```
+> (`/health` é idêntico nas duas instâncias — **não serve** para provar roteamento.)
+
 ## 6) Gatilho (webhook) na Iugu da MegaTeam
 No painel da Iugu **da conta MegaTeam**, aponte o gatilho de `invoice.status_changed` para o
 **caminho `/megateam`** no mesmo domínio:

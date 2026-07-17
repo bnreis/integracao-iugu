@@ -1,6 +1,6 @@
 # ADR-0007 — Suporte a múltiplas empresas via DUAS INSTÂNCIAS + seletor no login
 
-- **Status:** Aceito (decisão do Bruno em 2026-07-14) — implementação em fases.
+- **Status:** ✅ **Implementado em produção** (2026-07-17) — MegaSuporte (`:8000`) + MegaTeam (`:8001`), mesmo domínio via caminho `/megateam`, seletor de empresa no app/painel.
 - **Atualização 2026-07-14:** por decisão do Bruno, **mesmo domínio** (`iugu.megasuporte.com`),
   sem subdomínio novo. As duas instâncias convivem atrás do **mesmo domínio, roteadas por
   CAMINHO** no Apache (`/api/…` → MegaSuporte:8000, `/megateam/api/…` → MegaTeam:8001). O
@@ -100,6 +100,22 @@ empresas crescer muito, reavaliar a migração para multi-tenant.
 3. **Seletor de empresa** no app/painel (login mantém, alterna baseUrl+token por empresa).
 4. **Emissão de teste** ponta a ponta na MegaTeam (fatura R$1 → paga → NFS-e → e-mail),
    respeitando o guardrail.
+
+## ⚠️ Armadilha crítica do roteamento (postmortem 2026-07-17)
+
+Ao adicionar as regras `/megateam/*` no vhost `:443` **à mão (nano)**, as rotas
+**originais da MegaSuporte** (`/api/`, `/auth/`, `/webhook/`, `/health`) foram corrompidas
+para `127.0.0.1:**8001**` (MegaTeam) em vez de `:**8000**`. Resultado: as duas empresas
+mostravam os dados da MegaTeam por ~1 dia (e os webhooks da MegaSuporte iam pro backend
+errado). **Detalhes: `docs/incidente_multiempresa_apache_2026-07.md`.**
+
+**Regra de ouro ao mexer no vhost:** depois de QUALQUER edição, rode
+`sudo grep -n ProxyPass <vhost>` e confira o **destino de TODAS as linhas** —
+`/api /auth /webhook /health` → **8000** (MegaSuporte); `/megateam/*` → **8001** (MegaTeam).
+E valide **pelo domínio público** (não só localhost): `curl` autenticado em
+`https://iugu.megasuporte.com/api/dashboard` vs `.../megateam/api/dashboard` deve devolver
+**dados diferentes**. `/health` é idêntico nas duas instâncias — **não serve** para provar
+roteamento.
 
 ## Inputs necessários do Bruno (de forma segura — NUNCA colar no chat)
 - **Token da API Iugu da MegaTeam** (conta nova). Vai só no `.env` da 2ª instância.
