@@ -24,7 +24,7 @@ Segunda empresa **MegaTeam** (CNPJ 27.987.745/0001-42) rodando ao lado da MegaSu
 2. **Gatilho da MegaTeam** na Iugu → `https://iugu.megasuporte.com/megateam/webhook/iugu?token=<IUGU_WEBHOOK_TOKEN>`.
 3. 🔴 **Excluir o token vazado** da MegaTeam na Iugu (o antigo `C69906999...`, vazou no chat — já rotacionado no `.env`, falta apagar na Iugu).
 4. **Faturamento recorrente / cobrança dupla:** os 17 clientes foram importados com `dia_criacao_fatura`/`valor_fatura`. **NÃO ligar o cron da MegaTeam** até decidir quais clientes ela fatura (senão gera boleto+NFS-e em duplicidade com a MegaSuporte).
-5. **Emissão de teste R$1** na MegaTeam (ponta a ponta).
+5. **1ª emissão real da MegaTeam — ADIADA para a virada do mês (~01/08/2026)** (decisão do Bruno em 17/07). Só então validar ponta a ponta: certificado MegaTeam abre, IM aceita no ISSnet, contador RPS (próx. 37) casa. Acompanhar `journalctl -u iugu-webhook-megateam`. Até lá, **não** emitir nada pela MegaTeam.
 6. Purge do Cloudflare + WARP (o `no-store` já impede novo cache).
 
 ---
