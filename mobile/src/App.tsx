@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { ActivityIndicator, StatusBar, View } from "react-native";
+import { ActivityIndicator, Platform, StatusBar, View } from "react-native";
 import { NavigationContainer } from "@react-navigation/native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -27,6 +27,15 @@ export default function App() {
   // pré-selecionado naquela empresa.
   const trocarEmpresa = async (id: string) => {
     const temToken = await setEmpresaAtiva(id);
+    // WEB: recarrega a página inteira → estado 100% limpo e requisições novas para o
+    // backend da empresa escolhida (o remount por key não refazia o fetch no
+    // react-native-web, mostrando os dados da empresa carregada primeiro). A empresa
+    // já foi PERSISTIDA por setEmpresaAtiva, então o boot (hydrateToken) reabre nela.
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      window.location.reload();
+      return;
+    }
+    // NATIVO: o key={empresaId} remonta o navigator e as telas recarregam.
     setEmpresaId(id);
     if (!temToken) setLoggedIn(false);
   };
