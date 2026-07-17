@@ -70,6 +70,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# --- Anti-cache: a API é DINÂMICA e não pode ser cacheada por Cloudflare/navegador.
+# Sem isto, o Cloudflare estava servindo a resposta de UMA empresa para a outra
+# (multi-empresa, ADR-0007) — a tela mostrava sempre os mesmos dados. Força
+# no-store em TODA resposta do backend (webhook/API), que é sempre dinâmica. ---
+@app.middleware("http")
+async def _no_store_cache(request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 # --- Registra rotas da API de gestão ---
 from .api_routes import api_router, auth_router
 
