@@ -27,6 +27,13 @@ Segunda empresa **MegaTeam** (CNPJ 27.987.745/0001-42) rodando ao lado da MegaSu
 5. **1ª emissão real da MegaTeam — ADIADA para a virada do mês (~01/08/2026)** (decisão do Bruno em 17/07). Só então validar ponta a ponta: certificado MegaTeam abre, IM aceita no ISSnet, contador RPS (próx. 37) casa. Acompanhar `journalctl -u iugu-webhook-megateam`. Até lá, **não** emitir nada pela MegaTeam.
 6. Purge do Cloudflare + WARP (o `no-store` já impede novo cache).
 
+**Atualização 16/08/2026 (MegaTeam entrando em operação):**
+- ✅ **Cron da MegaTeam agendado** (`crontab -u iugu`, 9h/dia, `run_scheduled_invoices.py` na pasta da megateam). Antes **não existia** — por isso os boletos do dia não saíam sozinhos.
+- ✅ **Catch-up do mês:** `scripts/gerar_faturas_retroativas.py` criou os boletos que faltaram (ex.: PROCOR R$7.100 e FIPECQ R$3.210,48 no dia 15). Só cria boleto, **não** emite NFS-e.
+- ✅ **E-mail (SMTP) da MegaTeam configurado:** remetente **`financeiro@megateam.com.br`** (Gmail/Workspace, app password própria no `.env` da megateam, `SMTP LOGIN OK`). Antes o `.env` da megateam **não tinha SMTP** — não enviaria e-mail. *(MegaSuporte continua `comercial@megasuporte.com`.)*
+- 🐛 **Bug de listagem da Iugu (faturas):** boletos recém-criados **não aparecem** no `GET /v1/invoices` (nem por `customer_id`, `totalItems=0`) por um tempo, embora existam no portal — **mesma família** do bug de `/v1/customers`. Não é erro nosso (criação OK, portal mostra). Em aberto: decidir entre **esperar a indexação** ou **contorno com registro local de invoice_ids** na listagem do app.
+- ⏳ Ainda pendente: **gatilho (webhook) da MegaTeam** (item 2) — sem ele, NFS-e não emite ao pagar; e **excluir o token vazado** (item 3).
+
 ---
 
 ## 🚨 14/07/2026 — TLS da ISSnet quebrou TODAS as emissões (resolvido)
