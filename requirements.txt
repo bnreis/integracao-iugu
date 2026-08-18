@@ -21,10 +21,12 @@ lxml>=5.2.0                # Manipulação de XML (dep transitiva, explícita aq
 cryptography>=42.0.0       # Manipulação de certificados .pfx (A1)
 zeep>=4.2.1                # Cliente SOAP (para envio ao webservice do DF)
 
-# --- Geração de imagens ---
-# reportlab/qrcode REMOVIDOS: não geramos mais PDF próprio (DANFSE). O PDF/URL
-# oficial virá do ISSnet via ConsultarUrlNfse (trabalho futuro).
-pillow>=10.0.0             # Manipulação de imagens (usado por scripts/gerar_icone.py)
+# --- Geração de imagens / DANFSE (PDF) ---
+# ConsultarUrlNfse dá E160 (schema proprietário indisponível), então reproduzimos
+# a DANFSE oficial em PDF com dados reais da nota — ver src/danfse_pdf.py.
+reportlab>=4.0.0          # Geração do PDF da DANFSE (canvas)
+qrcode>=7.4.0            # QR de autenticidade na DANFSE
+pillow>=10.0.0             # Manipulação de imagens (logo, ícones)
 
 # --- MCP (Model Context Protocol) ---
 mcp[cli]>=1.2.0            # SDK oficial do MCP em Python
