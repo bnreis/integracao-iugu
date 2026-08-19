@@ -22,6 +22,7 @@ from types import SimpleNamespace
 # Permite "from src..." rodando o arquivo direto (scripts/ -> raiz do projeto).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src import email_nfse as _E  # noqa: E402
 from src.email_nfse import montar_email_nfse  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -47,14 +48,15 @@ def main() -> int:
     # montar_email_nfse não envia nada — só monta a mensagem MIME e devolve o HTML.
     _msg, html, destinatarios = montar_email_nfse(empresa, dados)
 
-    # No e-mail real a logo vai como anexo inline (cid:logo_megasuporte) — o que
-    # renderiza nos clientes de e-mail, mas NÃO no navegador. Só para o PREVIEW,
-    # trocamos o cid: por uma data-URI base64 da logo, pra ela aparecer ao abrir
-    # o HTML. (O e-mail enviado continua usando CID, que é o correto.)
-    _logo = PROJECT_ROOT / "assets" / "logo_megasuporte.png"
+    # No e-mail real a logo vai como anexo inline (cid:...) — o que renderiza nos
+    # clientes de e-mail, mas NÃO no navegador. Só para o PREVIEW, trocamos o cid:
+    # por uma data-URI base64 da logo, pra ela aparecer ao abrir o HTML. (O e-mail
+    # enviado continua usando CID, que é o correto.) Usa a logo/CID do branding
+    # vigente (settings), então funciona em qualquer instância (MegaSuporte/MegaTeam).
+    _logo = _E.LOGO_PATH
     if _logo.exists():
         _b64 = base64.b64encode(_logo.read_bytes()).decode("ascii")
-        html = html.replace("cid:logo_megasuporte", f"data:image/png;base64,{_b64}")
+        html = html.replace(f"cid:{_E._LOGO_CID}", f"data:image/png;base64,{_b64}")
 
     SAIDA_HTML.write_text(html, encoding="utf-8")
 

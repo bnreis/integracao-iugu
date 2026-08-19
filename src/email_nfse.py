@@ -37,20 +37,22 @@ from loguru import logger
 from .config import PROJECT_ROOT, settings
 from .iugu_empresas import Empresa
 
+# Branding do prestador — vem do .env (config.py), por instância (ADR-0007).
+# Defaults dos settings = MegaSuporte (retrocompat); a MegaTeam sobrescreve no .env.
 # Caminho da logo da assinatura. Embutida como imagem inline (CID) SE existir.
-LOGO_PATH = PROJECT_ROOT / "assets" / "logo_megasuporte.png"
+LOGO_PATH = PROJECT_ROOT / settings.prestador_logo_assinatura
 # Content-ID usado para referenciar a logo inline no HTML (<img src="cid:...">).
-_LOGO_CID = "logo_megasuporte"
+_LOGO_CID = "logo_prestador"
 
-# Dados fixos da assinatura (rodapé) — aprovados pelo Bruno.
-_PRESTADOR_NOME = "MEGASUPORTE SERVIÇOS DE TI"
-_FINANCEIRO_EMAIL = "financeiro@megasuporte.com"
-_ENDERECO_LINHA_1 = "SHN Quadra 01 Conjunto A Bloco A Ed. Le Quartier"
-_ENDERECO_LINHA_2 = "5º andar, sala 523, Brasília-DF, Cep 70.701-000"
+# Dados da assinatura (rodapé) e do corpo — dirigidos por .env.
+_PRESTADOR_NOME = settings.prestador_nome
+_FINANCEIRO_EMAIL = settings.prestador_financeiro_email
+_ENDERECO_LINHA_1 = settings.prestador_endereco_linha1
+_ENDERECO_LINHA_2 = settings.prestador_endereco_linha2
 # Página oficial de verificação de autenticidade da NFS-e do DF.
 _PORTAL_DANFSE = "https://iss.fazenda.df.gov.br/online/NotaDigital/VerificaAutenticidade.aspx"
-# Inscrição Municipal (CF/DF) da MEGASUPORTE — pedida na página de verificação.
-_INSCRICAO_MUNICIPAL = "0796481500161"
+# Inscrição Municipal (CF/DF) do prestador — pedida na página de verificação.
+_INSCRICAO_MUNICIPAL = settings.prestador_inscricao_municipal
 
 # Logo (versão fundo claro) da DANFSE por prestador — indexado pelo CNPJ (só dígitos)
 # lido do XML da nota. Multi-empresa: este módulo roda nas DUAS instâncias, então o
@@ -227,6 +229,14 @@ def _bloco_logo_html() -> str:
     return ""
 
 
+def _bloco_endereco_html() -> str:
+    """Linhas de endereço da assinatura — só as que estiverem preenchidas."""
+    linhas = [l for l in (_ENDERECO_LINHA_1, _ENDERECO_LINHA_2) if l and l.strip()]
+    return "".join(
+        f'<p style="margin: 0 0 2px;">{l}</p>' for l in linhas
+    )
+
+
 def _montar_html(
     *,
     numero_nfse: str,
@@ -312,8 +322,7 @@ def _montar_html(
       <p style="margin: 0 0 2px;">
         <a href="mailto:{_FINANCEIRO_EMAIL}" style="color: #1a5fb4;">{_FINANCEIRO_EMAIL}</a>
       </p>
-      <p style="margin: 0 0 2px;">{_ENDERECO_LINHA_1}</p>
-      <p style="margin: 0;">{_ENDERECO_LINHA_2}</p>
+      {_bloco_endereco_html()}
     </div>
 
   </div>

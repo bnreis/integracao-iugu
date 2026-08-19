@@ -214,6 +214,34 @@ class Settings(BaseSettings):
         description="E-mail do remetente (se vazio, usa smtp_usuario)",
     )
 
+    # --- Branding do e-mail da NFS-e (prestador) ---
+    # Multi-empresa (ADR-0007): o mesmo código roda nas 2 instâncias; cada uma
+    # define seu branding no próprio .env. Defaults = MegaSuporte (retrocompat).
+    prestador_nome: str = Field(
+        "MEGASUPORTE SERVIÇOS DE TI",
+        description="Nome do prestador no corpo/assunto/assinatura do e-mail",
+    )
+    prestador_financeiro_email: str = Field(
+        "financeiro@megasuporte.com",
+        description="E-mail do financeiro exibido na assinatura do e-mail",
+    )
+    prestador_inscricao_municipal: str = Field(
+        "0796481500161",
+        description="Inscrição Municipal (CF/DF) exibida no corpo do e-mail",
+    )
+    prestador_endereco_linha1: str = Field(
+        "SHN Quadra 01 Conjunto A Bloco A Ed. Le Quartier",
+        description="1ª linha do endereço na assinatura (vazio = não exibe)",
+    )
+    prestador_endereco_linha2: str = Field(
+        "5º andar, sala 523, Brasília-DF, Cep 70.701-000",
+        description="2ª linha do endereço na assinatura (vazio = não exibe)",
+    )
+    prestador_logo_assinatura: str = Field(
+        "assets/logo_megasuporte.png",
+        description="Caminho (relativo à raiz) do logo inline da assinatura do e-mail",
+    )
+
     # --- IBSCBS (Reforma Tributária EC 132/2023 — obrigatório no schema v1.01) ---
     # Código indicador de operação (6 dígitos) — tabela IndOp_IBSCBS.xlsx do Nota Control
     # Campo OPCIONAL segundo contador (validado em 2026-04-20) — deixar vazio
