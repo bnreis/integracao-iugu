@@ -434,17 +434,19 @@ def _texto_multilinha(c, texto: str, x: float, y: float, largura: float, size=7,
 def _carregar_logo(dados: dict[str, Any]):
     """Logo do prestador (ImageReader) para o cabeçalho, ou None se indisponível.
 
-    Usa dados['logo_path'] quando informado; senão cai no logo da MegaTeam em
-    assets/logo_megateam_claro.png (versão para fundo claro). Retorna None em
-    silêncio se o arquivo/reportlab não estiverem disponíveis — o PDF é gerado
-    sem logo, sem quebrar.
+    Contrato de dados['logo_path']:
+      - ausente/None  → cai no logo da MegaTeam (conveniência do teste standalone);
+      - "" (vazio)    → SEM logo (usado pelo e-mail quando o prestador não é MegaTeam);
+      - caminho       → usa esse arquivo.
+    Retorna None em silêncio se o arquivo/reportlab não estiverem disponíveis — o
+    PDF é gerado sem logo, sem quebrar.
     """
     try:
         from reportlab.lib.utils import ImageReader
     except Exception:
         return None
     caminho = dados.get("logo_path")
-    if not caminho:
+    if caminho is None:
         padrao = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "assets", "logo_megateam_claro.png",

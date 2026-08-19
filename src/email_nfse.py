@@ -23,6 +23,7 @@ sem erro (o fluxo principal não é interrompido por falha de e-mail).
 """
 from __future__ import annotations
 
+import re
 import smtplib
 from email.mime.application import MIMEApplication
 from email.mime.image import MIMEImage
@@ -50,6 +51,13 @@ _ENDERECO_LINHA_2 = "5º andar, sala 523, Brasília-DF, Cep 70.701-000"
 _PORTAL_DANFSE = "https://iss.fazenda.df.gov.br/online/NotaDigital/VerificaAutenticidade.aspx"
 # Inscrição Municipal (CF/DF) da MEGASUPORTE — pedida na página de verificação.
 _INSCRICAO_MUNICIPAL = "0796481500161"
+
+# Logo (versão fundo claro) da DANFSE por prestador — indexado pelo CNPJ (só dígitos)
+# lido do XML da nota. Multi-empresa: este módulo roda nas DUAS instâncias, então o
+# logo NÃO pode ser fixo. Prestador fora do mapa → DANFSE sem logo (padrão oficial).
+_LOGO_DANFSE_POR_CNPJ: dict[str, Path] = {
+    "27987745000142": PROJECT_ROOT / "assets" / "logo_megateam_claro.png",  # MegaTeam
+}
 
 
 def _smtp_configurado() -> bool:
@@ -148,6 +156,67 @@ def _anexar_xml_nfse(msg: MIMEMultipart, dados: dict[str, Any], numero_nfse: str
     return False
 
 
+def _xml_para_danfse(dados: dict[str, Any]) -> Optional[str]:
+    """Devolve o XML (string) usado para montar a DANFSE.
+
+    Preferência: o XML de RETORNO (NFS-e oficial, já isolado em CompNfse/Nfse);
+    fallback: o XML enviado (DPS/RPS). Retorna None se nenhum estiver disponível.
+    """
+    xml_retorno = dados.get("xml_retorno_path")
+    if xml_retorno:
+        caminho = Path(xml_retorno)
+        if caminho.exists():
+            payload = _extrair_nfse_do_retorno(caminho)
+            if payload:
+                return payload.decode("utf-8", errors="replace")
+
+    xml_enviado = dados.get("xml_enviado_path")
+    if xml_enviado:
+        caminho = Path(xml_enviado)
+        if caminho.exists():
+            try:
+                return caminho.read_text(encoding="utf-8")
+            except Exception as exc:
+                logger.warning(f"Falha ao ler XML enviado {caminho} p/ DANFSE: {exc}")
+    return None
+
+
+def _anexar_pdf_danfse(msg: MIMEMultipart, dados: dict[str, Any], numero_nfse: str) -> bool:
+    """Gera a DANFSE (PDF) a partir do XML da nota e anexa. Retorna True se anexou.
+
+    Nunca levanta exceção: qualquer falha (import, parse, geração) apenas loga e
+    devolve False — o e-mail segue com o XML mesmo sem o PDF.
+    """
+    try:
+        from .danfse_pdf import dados_de_consulta_xml, gerar_danfse_pdf
+    except Exception as exc:
+        logger.warning(f"DANFSE PDF indisponível (import): {exc}")
+        return False
+
+    xml = _xml_para_danfse(dados)
+    if not xml:
+        logger.warning(f"Sem XML para gerar a DANFSE PDF da NFS-e Nº {numero_nfse}")
+        return False
+
+    try:
+        pdf_dados = dados_de_consulta_xml(xml)
+        cnpj = re.sub(r"\D", "", pdf_dados.get("prest_cnpj") or "")
+        logo = _LOGO_DANFSE_POR_CNPJ.get(cnpj)
+        # "" explícito = sem logo (prestador não mapeado); só MegaTeam recebe o dela.
+        pdf_dados["logo_path"] = str(logo) if (logo and logo.exists()) else ""
+        pdf_bytes = gerar_danfse_pdf(pdf_dados)
+    except Exception as exc:
+        logger.warning(f"Falha ao gerar a DANFSE PDF da NFS-e Nº {numero_nfse}: {exc}")
+        return False
+
+    parte = MIMEApplication(pdf_bytes, _subtype="pdf")
+    nome = f"NFS-e_{numero_nfse}.pdf"
+    parte["Content-Disposition"] = f'attachment; filename="{nome}"'
+    parte.set_type("application/pdf")
+    msg.attach(parte)
+    return True
+
+
 def _bloco_logo_html() -> str:
     """Retorna a tag <img> da logo (CID) se o arquivo existir, senão string vazia."""
     if LOGO_PATH.exists():
@@ -224,14 +293,14 @@ def _montar_html(
     </table>
 
     <p style="margin: 0 0 12px;">
-      &#128206; <strong>Anexo:</strong> XML da NFS-e.
+      &#128206; <strong>Anexos:</strong> PDF da NFS-e (DANFSE) e o arquivo XML.
     </p>
 
     <p style="margin: 0 0 16px;">
-      &#128279; <strong>PDF oficial / verificar autenticidade:</strong> acesse
+      &#128279; <strong>Verificar autenticidade:</strong> acesse
       <a href="{_PORTAL_DANFSE}" style="color: #1a5fb4;">{_PORTAL_DANFSE}</a>
       e informe os dados acima (Inscrição Municipal, Número da NFS-e e Código de
-      verificação) para visualizar/imprimir a nota.
+      verificação) para conferir a nota no portal oficial.
     </p>
 
     <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
@@ -317,11 +386,16 @@ def montar_email_nfse(
             logger.warning(f"Falha ao embutir logo {LOGO_PATH}: {exc}")
     msg.attach(corpo)
 
-    # Anexo: XML da NFS-e oficial, no nível "mixed". Se não houver, envia mesmo
-    # assim (warning).
+    # Anexos (nível "mixed"): PDF da DANFSE + XML da NFS-e oficial. Nenhum é
+    # obrigatório — se faltar, envia assim mesmo (warning), sem interromper.
+    if not _anexar_pdf_danfse(msg, dados, numero_nfse):
+        logger.info(
+            f"E-mail da NFS-e Nº {numero_nfse} sem PDF DANFSE (segue com XML) "
+            f"— empresa {razao_tomador}"
+        )
     if not _anexar_xml_nfse(msg, dados, numero_nfse):
         logger.warning(
-            f"XML da NFS-e Nº {numero_nfse} não encontrado — e-mail enviado SEM anexo "
+            f"XML da NFS-e Nº {numero_nfse} não encontrado — e-mail enviado SEM XML "
             f"(empresa {razao_tomador})"
         )
 
