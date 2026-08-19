@@ -334,11 +334,12 @@ def gerar_danfse_pdf(dados: dict[str, Any]) -> bytes:
 
     # ---------- DETALHAMENTO DOS TRIBUTOS ----------
     y = barra_titulo(y, "Detalhamento dos Tributos")
-    htr = 78
+    htr = 84
     rect(x0, y - htr, LARG, htr)
-    # linha atividade
-    linha(x0, y - 20, x1, y - 20)
-    desc_ativ = f"{dados.get('cod_trib_mun','')} - {dados.get('desc_cod_trib_mun','') or ''}"[:76]
+    # linha atividade (mais alta p/ a descrição caber em até 2 linhas sem cortar)
+    ha = 26
+    linha(x0, y - ha, x1, y - ha)
+    desc_ativ = f"{dados.get('cod_trib_mun','')} - {dados.get('desc_cod_trib_mun','') or ''}"[:200]
     # Colunas dimensionadas para fechar EXATAMENTE em x1 (a última ocupa o resto):
     # Atividade | Alíquota | Item LC116 | Cód. NBS | Cód. CNAE
     ca = LARG * 0.56
@@ -349,8 +350,17 @@ def gerar_danfse_pdf(dados: dict[str, Any]) -> bytes:
     x_cnae = x_nbs + w_nbs
     w_cnae = x1 - x_cnae
     for xx in (x_aliq, x_item, x_nbs, x_cnae):
-        linha(xx, y - 20, xx, y)
-    campo(x0, y, ca, "Atividade do Município", desc_ativ, size=6.5)
+        linha(xx, y - ha, xx, y)
+    # Atividade: rótulo + descrição quebrada em até 2 linhas dentro da coluna.
+    txt(x0 + 3, y - 7, "Atividade do Município", size=5.5, color=(0.35, 0.35, 0.35))
+    _linhas_ativ = _quebrar_em_linhas(desc_ativ, ca - 6, 6.5)
+    if len(_linhas_ativ) > 2:  # estoura 2 linhas: corta e sinaliza com reticências
+        _linhas_ativ = _linhas_ativ[:2]
+        _linhas_ativ[1] = _linhas_ativ[1].rstrip() + "…"
+    _yd = y - 15.5
+    for _l in _linhas_ativ[:2]:
+        txt(x0 + 3, _yd, _l, size=6.5)
+        _yd -= 8
     campo(x_aliq, y, w_aliq, "Alíquota", (dados.get("aliquota", "") or "").replace(".", ","))
     campo(x_item, y, w_item, "Item da LC116/2003", dados.get("item_lista", "").replace(".", "") if dados.get("item_lista") else "")
     campo(x_nbs, y, w_nbs, "Cód. NBS", "")
@@ -364,7 +374,7 @@ def gerar_danfse_pdf(dados: dict[str, Any]) -> bytes:
                 linha(xx, yy - 19, xx, yy)
             txt(xx + 2, yy - 7, lab, size=5, color=(0.35, 0.35, 0.35))
             txt(xx + 2, yy - 16, val, size=6.5, bold=True)
-    y2 = y - 20
+    y2 = y - ha
     linha(x0, y2 - 19, x1, y2 - 19)
     _linha_valores(y2, [
         ("VI. Total dos Serviços", _brl(dados.get("valor_servicos"))),
@@ -408,6 +418,25 @@ def gerar_danfse_pdf(dados: dict[str, Any]) -> bytes:
     c.showPage()
     c.save()
     return buf.getvalue()
+
+
+def _quebrar_em_linhas(texto: str, largura: float, size: float, fonte: str = "Helvetica") -> list[str]:
+    """Quebra `texto` em linhas que cabem em `largura` (por palavra e por \\n)."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    linhas: list[str] = []
+    for paragrafo in str(texto or "").split("\n"):
+        atual = ""
+        for palavra in paragrafo.split(" "):
+            teste = (atual + " " + palavra).strip()
+            if not atual or stringWidth(teste, fonte, size) <= largura:
+                atual = teste
+            else:
+                linhas.append(atual)
+                atual = palavra
+        if atual:
+            linhas.append(atual)
+    return linhas
 
 
 def _texto_multilinha(c, texto: str, x: float, y: float, largura: float, size=7, leading=9) -> float:
