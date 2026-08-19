@@ -20,6 +20,8 @@ Três entregas, todas **commitadas e deployadas nas duas instâncias** (validado
 
 **Commits:** `8795aea` (DANFSE+logo+CNAE), `2179509` (PDF no e-mail), `503e100` (descrição 2 linhas), `0d8ad72` (branding por empresa). Ambas as instâncias em `0d8ad72`.
 
+**✅ Gatilho (webhook) da MegaTeam VERIFICADO (18/08) — resolve o item 2 das pendências de 17/07:** já existia e ativo na conta Iugu da MegaTeam (`invoice.status_changed` → `https://iugu.megasuporte.com/megateam/webhook/iugu?token=...`). Conferido via API: token do gatilho **== `IUGU_WEBHOOK_TOKEN` do `.env`** (MATCH) e teste ponta-a-ponta pela **URL pública** com evento não-pago deu **HTTP 200 `{"ignored":true}`** (Apache→8001 + validação de token OK). Falta só o caminho do evento *pago* de verdade, que sai na 1ª emissão real (virada do mês).
+
 **Notas / pendências:**
 - O e-mail com PDF só aparece **no próximo envio** (MegaSuporte na próxima NFS-e paga; MegaTeam na virada do mês). Validação em inbox real: `scripts/enviar_email_nfse_teste.py` ou "reenviar" no painel (cuidado: dispara ao tomador real).
 - QR da DANFSE aponta pro **portal de login** (não verificação direta) — o XML de consulta não traz a chave de acesso nacional. Se surgir a URL/chave que o QR oficial usa, replicar.
