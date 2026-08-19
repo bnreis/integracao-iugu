@@ -1,8 +1,29 @@
 # HANDOFF — Estado atual do projeto
 
-> **Para o próximo assistente:** ponto de entrada da próxima sessão. Leia na íntegra antes de responder ao Bruno. Atualizado em **18/06/2026**.
+> **Para o próximo assistente:** ponto de entrada da próxima sessão. Leia na íntegra antes de responder ao Bruno. Atualizado em **18/08/2026**.
 
 **Usuário:** Bruno Reis (bruno.reis@grupontsec.com) — admin da conta Iugu da **MEGASUPORTE SERVIÇOS DE TI LTDA** (CNPJ 36.342.291/0001-43, Brasília/DF, Simples Nacional ME/EPP, ambiente "Estabelecido").
+
+---
+
+## 🆕 18/08/2026 — DANFSE (PDF) no e-mail + branding por empresa — NO AR
+
+Três entregas, todas **commitadas e deployadas nas duas instâncias** (validado: serviços `active`, `/health` OK, branding isolado por empresa).
+
+**1. Gerador da DANFSE (PDF)** — `src/danfse_pdf.py` (novo). Como `ConsultarUrlNfse` dá **E160** (schema proprietário do ISSnet indisponível), reproduzimos o **layout da DANFSE oficial** (reportlab canvas) com os **dados reais** da nota (parser `dados_de_consulta_xml` tolerante a NS) + QR de autenticidade. Logo da MegaTeam no cabeçalho (`assets/logo_megateam_claro.png` = versão fundo claro, texto escurecido). CLI de teste: `scripts/gerar_danfse_teste.py <xml>`. Deps novas: **reportlab, qrcode** (no `requirements.txt`; instalados na VPS: reportlab 5.0.0, qrcode 8.2).
+
+**2. PDF anexado no e-mail** — `email_nfse._anexar_pdf_danfse`: o e-mail ao tomador agora leva **2 anexos** (PDF da DANFSE + XML). Nunca quebra o envio (falha → só loga, segue com XML). Logo da DANFSE resolvido **pelo CNPJ do prestador** (`_LOGO_DANFSE_POR_CNPJ`) — multi-empresa, não fixo.
+
+**3. Branding do e-mail por empresa (ADR-0007)** — o corpo/assunto/assinatura eram fixos em MEGASUPORTE (o módulo roda nas 2 instâncias → MegaTeam sairia mis-brandada). Agora vem do `.env`: campos `PRESTADOR_*` em `config.py` (defaults = MegaSuporte, retrocompat). **`.env` da MegaTeam** recebeu (linhas 42–47): `PRESTADOR_NOME=MEGATEAM SERVIÇOS DE TI`, `PRESTADOR_FINANCEIRO_EMAIL=financeiro@megateam.com.br`, `PRESTADOR_INSCRICAO_MUNICIPAL=0781513100130`, `PRESTADOR_ENDERECO_LINHA1/2=` (vazio, sem endereço na assinatura), `PRESTADOR_LOGO_ASSINATURA=assets/logo_megateam_claro.png`. Endereço da assinatura é condicional (vazio = não renderiza).
+
+**+ Ajuste:** descrição da "Atividade do Município" na DANFSE agora quebra em **até 2 linhas** (era truncada em 76 chars).
+
+**Commits:** `8795aea` (DANFSE+logo+CNAE), `2179509` (PDF no e-mail), `503e100` (descrição 2 linhas), `0d8ad72` (branding por empresa). Ambas as instâncias em `0d8ad72`.
+
+**Notas / pendências:**
+- O e-mail com PDF só aparece **no próximo envio** (MegaSuporte na próxima NFS-e paga; MegaTeam na virada do mês). Validação em inbox real: `scripts/enviar_email_nfse_teste.py` ou "reenviar" no painel (cuidado: dispara ao tomador real).
+- QR da DANFSE aponta pro **portal de login** (não verificação direta) — o XML de consulta não traz a chave de acesso nacional. Se surgir a URL/chave que o QR oficial usa, replicar.
+- `.env` da MegaTeam tem **`SMTP_REMETENTE_NOME=MEGATEAM` duplicado** (linhas 28 e 37) — inofensivo (mesmo valor); limpar quando conveniente.
 
 ---
 
