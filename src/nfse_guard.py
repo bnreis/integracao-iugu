@@ -195,7 +195,8 @@ def _lock_invoice(invoice_id: str):
 # Guardrail contra NFS-e duplicada
 # ============================================================
 def _verificar_nfse_duplicada(
-    invoice_id: str, cnpj: str, invoice: dict, empresa: Any = None
+    invoice_id: str, cnpj: str, invoice: dict, empresa: Any = None,
+    competencia: str | None = None,
 ) -> dict | None:
     """
     Verifica se já existe NFS-e emitida que impeça emitir agora.
@@ -214,6 +215,12 @@ def _verificar_nfse_duplicada(
     `empresa` é mantido na assinatura apenas por compatibilidade com os
     chamadores; não é mais usado (a regra antiga de nf_na_criacao foi removida
     porque pulava emissão por flag, não por evidência).
+
+    `competencia` ("YYYY-MM", opcional) ativa a EXCEÇÃO RETROATIVA: a Regra 2 passa
+    a deduplicar pela COMPETÊNCIA informada (contra o campo `competencia` do log,
+    com fallback pro mês de `data_emissao` em logs antigos) em vez do mês de
+    emissão. None (padrão) = comportamento original, inalterado. A Regra 1 (por
+    invoice_id) vale sempre, independentemente disso.
 
     Retorna dict com detalhes se duplicata encontrada, None se ok.
     """
@@ -251,9 +258,19 @@ def _verificar_nfse_duplicada(
     # propósito — esse caso é tratado pela marcação manual "NF-e já emitida".
     if nfse_dir.exists():
         cnpj_norm = _normalizar_doc(cnpj)
-        mes_pagamento = (invoice.get("paid_at") or "")[:7]  # "2026-04"
-        mes_hoje = date.today().isoformat()[:7]
-        meses_validos = {m for m in (mes_pagamento, mes_hoje) if len(m) >= 7}
+        comp = (competencia or "")[:7]
+        if comp:
+            # EXCEÇÃO RETROATIVA (competência informada pelo operador): dedupe pela
+            # COMPETÊNCIA escolhida, NÃO pelo mês de emissão. Isso permite emitir uma
+            # nota de mês passado mesmo já havendo nota no mês corrente; e ainda
+            # BLOQUEIA uma 2ª nota da MESMA competência para o mesmo CNPJ.
+            meses_validos = {comp}
+        else:
+            # Caminho normal (INALTERADO): 1 NFS-e por CNPJ por MÊS DE EMISSÃO,
+            # casando o mês do log com o mês do pagamento OU o mês de hoje.
+            mes_pagamento = (invoice.get("paid_at") or "")[:7]  # "2026-04"
+            mes_hoje = date.today().isoformat()[:7]
+            meses_validos = {m for m in (mes_pagamento, mes_hoje) if len(m) >= 7}
 
         if cnpj_norm and meses_validos:
             for log_file in nfse_dir.glob("*.json"):
@@ -269,7 +286,13 @@ def _verificar_nfse_duplicada(
                     continue
                 if _normalizar_doc(data.get("cnpj")) != cnpj_norm:
                     continue
-                mes_log = (data.get("data_emissao") or "")[:7]
+                # Mês comparado: na exceção retroativa, a COMPETÊNCIA do log (fallback:
+                # mês de emissão, p/ logs antigos sem o campo `competencia`); no caminho
+                # normal, o mês de emissão (comportamento original, byte-a-byte).
+                if comp:
+                    mes_log = (data.get("competencia") or (data.get("data_emissao") or "")[:7])[:7]
+                else:
+                    mes_log = (data.get("data_emissao") or "")[:7]
                 if mes_log in meses_validos:
                     return {
                         "fonte": "duplicata_cliente_mes",

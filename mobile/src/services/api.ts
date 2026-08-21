@@ -304,6 +304,15 @@ export async function emitirNfseManual(invoiceId: string) {
   return request("POST", `/api/nfse/${invoiceId}/emitir-manual`);
 }
 
+// Emissão RETROATIVA: gera a NFS-e com a COMPETÊNCIA de um mês anterior (YYYY-MM).
+// Usado quando o boleto está atrasado e a nota é de mês passado; o guardrail passa a
+// deduplicar por essa competência (permite emitir mesmo já havendo nota no mês atual).
+export async function emitirNfseCompetencia(invoiceId: string, competencia: string) {
+  return request("POST", `/api/nfse/${invoiceId}/emitir-competencia`, {
+    competencia,
+  });
+}
+
 // Marca a fatura como JÁ tendo NF-e emitida (sem emitir agora). Usado quando a nota
 // foi emitida por uma fatura anterior (cancelada+recriada): bloqueia a reemissão.
 export async function marcarNfseEmitida(

@@ -813,6 +813,50 @@ async def emitir_nfse_manual_endpoint(invoice_id: str):
     return resultado
 
 
+class EmitirCompetenciaRequest(BaseModel):
+    competencia: str = PydField(
+        ..., description="Mês de competência da NFS-e no formato YYYY-MM (ex.: 2026-07)"
+    )
+
+
+# Retroatividade permitida: mesmo corte que o app usa nas telas (março/2026).
+_COMPETENCIA_MINIMA = "2026-03"
+
+
+@api_router.post("/nfse/{invoice_id}/emitir-competencia")
+async def emitir_nfse_competencia_endpoint(invoice_id: str, req: EmitirCompetenciaRequest):
+    """Emissão RETROATIVA: gera a NFS-e com a COMPETÊNCIA de um mês anterior.
+
+    Exceção manual do operador (ex.: boleto atrasado, cuja nota é do mês passado).
+    A competência informada ajusta o <Competencia> da nota E faz o guardrail
+    deduplicar por essa competência (permite emitir p/ julho mesmo já havendo nota
+    de agosto; ainda bloqueia 2ª nota da MESMA competência). Mantém empresa
+    autorizada, emitir_nf, lock e Regra 1 (por fatura).
+    """
+    _validar_invoice_id(invoice_id)
+
+    comp = (req.competencia or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}", comp):
+        raise HTTPException(422, "competencia inválida: use o formato YYYY-MM (ex.: 2026-07)")
+    try:
+        ano, mes = int(comp[:4]), int(comp[5:7])
+        date(ano, mes, 1)  # valida mês 01..12
+    except ValueError:
+        raise HTTPException(422, f"competencia inválida: '{comp}'")
+
+    mes_atual = date.today().isoformat()[:7]
+    if comp < _COMPETENCIA_MINIMA or comp > mes_atual:
+        raise HTTPException(
+            422,
+            f"competencia fora do intervalo permitido "
+            f"({_COMPETENCIA_MINIMA} até {mes_atual}): '{comp}'",
+        )
+
+    from .webhook_server import processar_pagamento
+    resultado = await processar_pagamento(invoice_id, forcar_emissao=True, competencia=comp)
+    return resultado
+
+
 class MarcarNfseEmitidaRequest(BaseModel):
     numero_nfse: str = PydField(
         "", description="Numero da NFS-e ja emitida (opcional, para rastreio)"

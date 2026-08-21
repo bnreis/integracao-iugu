@@ -21,6 +21,7 @@ import {
   cancelarFatura,
   emitirNfse,
   emitirNfseManual,
+  emitirNfseCompetencia,
   marcarNfseEmitida,
   reenviarNfseEmail,
   darBaixaManual,
@@ -99,6 +100,28 @@ function labelMes(ano: number, mes: number): string {
   return `${MESES[mes]} ${ano}`;
 }
 
+// Competências para emissão RETROATIVA: do mês atual até março/2026 (mesmo corte do
+// app). Retorna { valor: "YYYY-MM", label: "Mês Ano" }, do mais recente ao mais antigo.
+const COMP_MIN = { ano: 2026, mes: 2 }; // 0-indexed (2 = março)
+function competenciasDisponiveis(): { valor: string; label: string }[] {
+  const out: { valor: string; label: string }[] = [];
+  const a = getMesAtual();
+  let ano = a.ano;
+  let mes = a.mes;
+  while (ano > COMP_MIN.ano || (ano === COMP_MIN.ano && mes >= COMP_MIN.mes)) {
+    const valor = `${ano}-${String(mes + 1).padStart(2, "0")}`;
+    const sufixo = ano === a.ano && mes === a.mes ? " (atual)" : "";
+    out.push({ valor, label: `${MESES[mes]} ${ano}${sufixo}` });
+    if (mes === 0) {
+      mes = 11;
+      ano -= 1;
+    } else {
+      mes -= 1;
+    }
+  }
+  return out;
+}
+
 // ============================================================
 // Status helpers
 // ============================================================
@@ -167,6 +190,10 @@ export default function FaturasScreen() {
   // Seletor de baixa manual (modal aninhado)
   const [baixaSelectVisible, setBaixaSelectVisible] = useState(false);
   const [baixaInvoiceId, setBaixaInvoiceId] = useState<string | null>(null);
+
+  // Seletor de competência (emissão retroativa)
+  const [compSelectVisible, setCompSelectVisible] = useState(false);
+  const [compInvoiceId, setCompInvoiceId] = useState<string | null>(null);
 
   // Helper de confirmação (funciona na web e no mobile)
   const confirmar = (titulo: string, mensagem: string, onConfirm: () => void) => {
@@ -317,6 +344,39 @@ export default function FaturasScreen() {
         setActionLoading(false);
         if (res.data?.success) {
           alertMsg("Sucesso", "Nota Fiscal emitida e enviada com sucesso!");
+          setModalVisible(false);
+          setDetalhe(null);
+          fetchFaturas();
+        } else {
+          const f = falhaEmissao(res);
+          alertMsg(f.titulo, f.mensagem);
+        }
+      },
+    );
+  };
+
+  // Abre o seletor de competência (emissão retroativa) para a fatura atual.
+  const abrirCompetencia = (id: string) => {
+    setCompInvoiceId(id);
+    setCompSelectVisible(true);
+  };
+
+  // Emite a NFS-e com a competência escolhida (mês passado). O guardrail passa a
+  // deduplicar por essa competência — permite emitir mesmo já havendo nota no mês.
+  const handleEmitirCompetencia = (competencia: string, label: string) => {
+    const id = compInvoiceId;
+    setCompSelectVisible(false);
+    if (!id) return;
+    confirmar(
+      "Emitir NFS-e retroativa",
+      `Confirma a emissão da Nota Fiscal com competência de ${label}?`,
+      async () => {
+        setActionLoading(true);
+        const res = await emitirNfseCompetencia(id, competencia);
+        setActionLoading(false);
+        if (res.data?.success) {
+          alertMsg("Sucesso", `Nota Fiscal emitida com competência ${label} e enviada.`);
+          setCompInvoiceId(null);
           setModalVisible(false);
           setDetalhe(null);
           fetchFaturas();
@@ -732,6 +792,19 @@ export default function FaturasScreen() {
                       <Text style={styles.actionText}>Marcar NF-e como já emitida</Text>
                     </TouchableOpacity>
                   )}
+                  {/* Emissão RETROATIVA: escolher a competência (mês passado). Útil
+                      quando o boleto está atrasado e a nota é de mês anterior — o
+                      guardrail deduplica por competência, não pelo mês de emissão. */}
+                  {detalhe.empresa_emite_nf !== false && !detalhe.nfse_emitida && (
+                    <TouchableOpacity
+                      style={[styles.actionBtn, { backgroundColor: "#b45309" }]}
+                      onPress={() => abrirCompetencia(detalhe.id)}
+                      disabled={actionLoading}
+                    >
+                      <Ionicons name="calendar" size={16} color="#fff" />
+                      <Text style={styles.actionText}>Emitir com competência…</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
 
                 {actionLoading && (
@@ -803,6 +876,43 @@ export default function FaturasScreen() {
               onPress={() => {
                 setBaixaSelectVisible(false);
                 setBaixaInvoiceId(null);
+              }}
+              disabled={actionLoading}
+            >
+              <Ionicons name="close" size={16} color="#fff" />
+              <Text style={styles.actionText}>Cancelar</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modal aninhado: seletor de competência (emissão retroativa) */}
+      <Modal visible={compSelectVisible} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.baixaSheet}>
+            <Text style={styles.baixaTitle}>Emitir com competência</Text>
+            <Text style={styles.baixaSubtitle}>
+              Escolha o mês de referência (competência) da nota. Use para boleto
+              atrasado cuja nota é de mês anterior.
+            </Text>
+            <ScrollView style={{ maxHeight: 320 }}>
+              {competenciasDisponiveis().map((c) => (
+                <TouchableOpacity
+                  key={c.valor}
+                  style={[styles.actionBtn, { backgroundColor: "#b45309", marginBottom: 8 }]}
+                  onPress={() => handleEmitirCompetencia(c.valor, c.label)}
+                  disabled={actionLoading}
+                >
+                  <Ionicons name="calendar" size={16} color="#fff" />
+                  <Text style={styles.actionText}>{c.label}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={[styles.actionBtn, { backgroundColor: "#6b7280" }]}
+              onPress={() => {
+                setCompSelectVisible(false);
+                setCompInvoiceId(null);
               }}
               disabled={actionLoading}
             >

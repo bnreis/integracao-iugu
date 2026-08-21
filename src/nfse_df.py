@@ -171,7 +171,9 @@ class ResultadoEmissao:
 #   - assinatura: async def emitir_nfse(invoice, empresa)
 #   - retorno: dict com a chave "sucesso" (ResultadoEmissao.to_dict())
 # =============================================================================
-async def emitir_nfse(invoice: dict[str, Any], empresa: Empresa) -> dict[str, Any]:
+async def emitir_nfse(
+    invoice: dict[str, Any], empresa: Empresa, competencia: Optional[str] = None
+) -> dict[str, Any]:
     """Emite uma NFS-e no DF, despachando para o backend do protocolo configurado.
 
     Lê `settings.nfse_padrao`:
@@ -181,15 +183,18 @@ async def emitir_nfse(invoice: dict[str, Any], empresa: Empresa) -> dict[str, An
     Args:
         invoice: payload completo da fatura da Iugu (tem payer_address_*, payer_name, etc.)
         empresa: dados cadastrais da empresa tomadora.
+        competencia: mês de competência "YYYY-MM" para emissão RETROATIVA (exceção
+            manual do operador). None (padrão) = competência do mês atual, i.e.
+            comportamento inalterado.
 
     Returns:
         Resultado em dict (ResultadoEmissao.to_dict()), idêntico em ambos os backends.
     """
     padrao = (settings.nfse_padrao or "nacional").lower()
     if padrao == "abrasf204":
-        return await _emitir_abrasf204(invoice, empresa)
+        return await _emitir_abrasf204(invoice, empresa, competencia=competencia)
     # Default e fallback: caminho nacional (comportamento de produção atual).
-    return await _emitir_nacional(invoice, empresa)
+    return await _emitir_nacional(invoice, empresa, competencia=competencia)
 
 
 # =============================================================================
@@ -224,8 +229,13 @@ ABRASF_SOAP_ACTION = f"{ABRASF_SERVICE_NS}/{ABRASF_OPERACAO}"
 ABRASF_VERSAO_DADOS = "2.04"
 
 
-async def _emitir_abrasf204(invoice: dict[str, Any], empresa: Empresa) -> dict[str, Any]:
+async def _emitir_abrasf204(
+    invoice: dict[str, Any], empresa: Empresa, competencia: Optional[str] = None
+) -> dict[str, Any]:
     """Emite uma NFS-e no DF via ABRASF 2.04 (RPS série 3, ISSnet) para uma fatura paga.
+
+    `competencia` ("YYYY-MM", opcional) força a competência retroativa (exceção
+    manual). None = mês atual (comportamento padrão).
 
     Fluxo (espelha o backend nacional, trocando só a montagem/protocolo do XML):
         1. Valida config + valor
@@ -293,6 +303,7 @@ async def _emitir_abrasf204(invoice: dict[str, Any], empresa: Empresa) -> dict[s
             endereco_tomador=endereco_tomador,
             invoice=invoice,
             numero_rps=numero_rps,
+            competencia=competencia,
         )
     except Exception as exc:
         logger.exception("Falha ao montar RPS ABRASF 2.04")
@@ -410,7 +421,7 @@ async def _emitir_abrasf204(invoice: dict[str, Any], empresa: Empresa) -> dict[s
         )
         # Grava o índice nfse_<invoice_id>.json que a API usa para detectar a nota
         # (listagem/detalhe/dashboard). Resiliente: não derruba a emissão se falhar.
-        _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_rps)
+        _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_rps, competencia=competencia)
         # TODO ConsultarUrlNfse: preencher resultado.pdf_path com a URL/PDF oficial.
 
     return resultado.to_dict()
@@ -458,12 +469,33 @@ def _proximo_numero_rps() -> str:
 # -----------------------------------------------------------------------------
 # Montagem do RPS no schema ABRASF 2.04 (via lxml — sem nfelib, sem IBSCBS)
 # -----------------------------------------------------------------------------
+def _competencia_data(competencia: Optional[str]) -> Optional[str]:
+    """Converte competência "YYYY-MM" na DATA a informar em <Competencia> (ISO).
+
+    Usa o ÚLTIMO dia do mês (garantido dentro do mês de referência). Ex.:
+    "2026-07" -> "2026-07-31". Retorna None se `competencia` for vazio/mal formado
+    (o chamador então usa a data de hoje = comportamento padrão).
+    """
+    if not competencia:
+        return None
+    m = re.fullmatch(r"(\d{4})-(\d{2})", competencia.strip())
+    if not m:
+        return None
+    import calendar as _calendar
+    ano, mes = int(m.group(1)), int(m.group(2))
+    if not (1 <= mes <= 12):
+        return None
+    ultimo_dia = _calendar.monthrange(ano, mes)[1]
+    return f"{ano:04d}-{mes:02d}-{ultimo_dia:02d}"
+
+
 def _montar_xml_rps_abrasf(
     empresa: Empresa,
     servico: DadosServico,
     endereco_tomador: dict[str, str],
     invoice: dict[str, Any],
     numero_rps: str,
+    competencia: Optional[str] = None,
 ) -> tuple[str, str]:
     """Monta o XML `GerarNfseEnvio` (RPS série 3) conforme o XSD ABRASF 2.04.
 
@@ -541,7 +573,10 @@ def _montar_xml_rps_abrasf(
     _el(rps_inf, "Status", "1")  # 1 = Normal
 
     # ---------- Competencia ----------
-    _el(inf_decl, "Competencia", hoje)
+    # Retroativa (exceção manual): usa o último dia do mês escolhido; senão, hoje.
+    # DataEmissao do RPS permanece "hoje" (a nota É emitida hoje, referenciando o
+    # mês de competência informado) — padrão fiscal para nota de mês anterior.
+    _el(inf_decl, "Competencia", _competencia_data(competencia) or hoje)
 
     # ---------- Servico (tcDadosServico) — ORDEM do XSD é obrigatória ----------
     serv = _el(inf_decl, "Servico")
@@ -1315,8 +1350,14 @@ def baixar_pdf_nfse(url: str) -> Optional[bytes]:
 # apenas movido para um backend nomeado, SEM qualquer mudança de lógica. Continua
 # sendo o caminho de produção atual (settings.nfse_padrao="nacional", default).
 # =============================================================================
-async def _emitir_nacional(invoice: dict[str, Any], empresa: Empresa) -> dict[str, Any]:
+async def _emitir_nacional(
+    invoice: dict[str, Any], empresa: Empresa, competencia: Optional[str] = None
+) -> dict[str, Any]:
     """Emite uma NFS-e no DF (Padrão Nacional / DPS) para uma fatura paga da Iugu.
+
+    `competencia` ("YYYY-MM") é registrada no log para a anti-duplicata retroativa.
+    ⚠️ O backend nacional NÃO está ativo em produção (padrão = abrasf204); a
+    competência retroativa no XML da DPS não foi implementada aqui — só no ABRASF.
 
     Args:
         invoice: payload completo da fatura da Iugu (tem payer_address_*, payer_name, etc.)
@@ -1493,7 +1534,7 @@ async def _emitir_nacional(invoice: dict[str, Any], empresa: Empresa) -> dict[st
         # Grava o índice nfse_<invoice_id>.json que a API usa para detectar a nota
         # (listagem/detalhe/dashboard). Resiliente: não derruba a emissão se falhar.
         # No backend nacional o documento de origem é a DPS — passamos numero_dps.
-        _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_dps)
+        _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_dps, competencia=competencia)
         # Não geramos mais PDF próprio (reportlab removido). O DANFSE oficial será
         # obtido do ISSnet via ConsultarUrlNfse no futuro; até lá, resultado.pdf_path
         # permanece None e o e-mail segue só com o XML.
@@ -2524,6 +2565,7 @@ def _gravar_log_nfse(
     resultado: ResultadoEmissao,
     rps_numero: Optional[int | str] = None,
     marcada_manualmente: bool = False,
+    competencia: Optional[str] = None,
 ) -> Optional[Path]:
     """Grava o log `nfse_<invoice_id>.json` que a API lê para detectar a nota emitida.
 
@@ -2573,6 +2615,9 @@ def _gravar_log_nfse(
         "razao_social": empresa.razao_social,
         "valor": valor_reais,
         "data_emissao": date.today().isoformat(),
+        # Mês de COMPETÊNCIA (YYYY-MM) da nota. Base da anti-duplicata retroativa
+        # (guardrail Regra 2 por competência). Sem competência informada = mês atual.
+        "competencia": (competencia[:7] if competencia else date.today().isoformat()[:7]),
         "sucesso": True,
         # Caminhos dos artefatos (string), reusados pelo reenvio de e-mail.
         "xml_enviado_path": str(resultado.xml_enviado_path) if resultado.xml_enviado_path else None,
@@ -2632,6 +2677,7 @@ def _gravar_log_nfse(
                 "cnpj": empresa.cnpj,
                 "valor": valor_reais,
                 "data_emissao": date.today().isoformat(),
+                "competencia": (competencia[:7] if competencia else date.today().isoformat()[:7]),
             }
             caminho_min.write_text(
                 json.dumps(indice_minimo, ensure_ascii=False),

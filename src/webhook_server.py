@@ -205,7 +205,7 @@ async def processar_manualmente(invoice_id: str):
 # Lógica central
 # ============================================================
 async def processar_pagamento(
-    invoice_id: str, forcar_emissao: bool = False
+    invoice_id: str, forcar_emissao: bool = False, competencia: str | None = None
 ) -> dict[str, Any]:
     """
     Fluxo central: busca a fatura, valida o CNPJ contra o cadastro Iugu
@@ -215,6 +215,10 @@ async def processar_pagamento(
     "fatura paga", permitindo emitir NFS-e de uma fatura ainda PENDENTE. Todo o
     resto (empresa autorizada, emitir_nf, lock e guardrail anti-duplicata) continua
     valendo. Usado pelo botão "Gerar NFS-e" em fatura pendente.
+
+    competencia ("YYYY-MM", opcional): emissão RETROATIVA (exceção manual). Ajusta
+    a competência da nota e faz o guardrail deduplicar por essa competência em vez
+    do mês de emissão. None (padrão) = comportamento inalterado.
     """
     # 1. Busca detalhes da fatura na Iugu
     try:
@@ -343,7 +347,7 @@ async def processar_pagamento(
             }
 
         # 4. GUARDRAIL: verifica se já existe NFS-e para este cliente/mês/valor
-        nfse_existente = _verificar_nfse_duplicada(invoice_id, cnpj, invoice, empresa)
+        nfse_existente = _verificar_nfse_duplicada(invoice_id, cnpj, invoice, empresa, competencia=competencia)
         if nfse_existente:
             logger.warning(
                 f"⚠️ GUARDRAIL: NFS-e já existe para fatura {invoice_id} "
@@ -367,7 +371,7 @@ async def processar_pagamento(
         try:
             from .nfse_df import emitir_nfse
 
-            resultado_nfse = await emitir_nfse(invoice=invoice, empresa=empresa)
+            resultado_nfse = await emitir_nfse(invoice=invoice, empresa=empresa, competencia=competencia)
 
             # WEB-011: rejeição da NFS-e (sucesso=False SEM exceção — ex.: erro de schema,
             # IM não liberada) NÃO pode ser rotulada como "emitida". É falha terminal
