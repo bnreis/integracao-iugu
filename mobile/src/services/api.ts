@@ -39,7 +39,10 @@ export interface Tenant {
 // "Tenant" = nossa empresa emissora (MegaSuporte/MegaTeam). NÃO confundir com as
 // "empresas" do domínio (os clientes que faturamos, em getEmpresas()).
 export const TENANTS: Tenant[] = [
-  { id: "megasuporte", nome: "MegaSuporte", prefixo: "" },
+  // MegaSuporte DESATIVADA (24/08/2026): não gera mais boletos nem emite NFS-e.
+  // Só a MegaTeam fica ativa. Para REATIVAR: descomente a linha abaixo E religue
+  // o cron + o gatilho (webhook) da conta Iugu da MegaSuporte.
+  // { id: "megasuporte", nome: "MegaSuporte", prefixo: "" },
   { id: "megateam", nome: "MegaTeam", prefixo: "/megateam" },
 ];
 
