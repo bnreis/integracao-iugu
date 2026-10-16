@@ -27,12 +27,13 @@ Referências:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -41,6 +42,7 @@ from loguru import logger
 
 from .config import get_nfse_endpoint, settings
 from .iugu_empresas import Empresa, format_cents_to_br
+from .tempo import agora_br, hoje_br
 
 # -----------------------------------------------------------------------------
 # Imports condicionais (libs pesadas) — validados na hora da emissão
@@ -296,7 +298,7 @@ async def _emitir_abrasf204(
 
     # 3. Montar o RPS (GerarNfseEnvio) e assinar
     try:
-        numero_rps = _proximo_numero_rps()
+        numero_rps = _proximo_numero_rps(invoice.get("id"))
         xml_envio, rps_id = _montar_xml_rps_abrasf(
             empresa=empresa,
             servico=servico,
@@ -364,7 +366,12 @@ async def _emitir_abrasf204(
         return resultado.to_dict()
 
     try:
-        resposta_xml, status_code = _enviar_soap_abrasf(envelope, endpoint)
+        # httpx é síncrono (até 60s): em thread para não congelar o event loop do
+        # uvicorn — senão o webhook e o painel ficam parados durante a emissão e as
+        # reentregas da Iugu se acumulam na fila.
+        resposta_xml, status_code = await asyncio.to_thread(
+            _enviar_soap_abrasf, envelope, endpoint
+        )
     except Exception as exc:
         logger.exception("Falha ao enviar RPS ABRASF ao webservice")
         resultado.mensagem_erro = f"Erro ao enviar ao webservice: {exc}"
@@ -422,6 +429,8 @@ async def _emitir_abrasf204(
         # Grava o índice nfse_<invoice_id>.json que a API usa para detectar a nota
         # (listagem/detalhe/dashboard). Resiliente: não derruba a emissão se falhar.
         _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_rps, competencia=competencia)
+        # Nota emitida: a reserva do RPS desta fatura não é mais necessária.
+        _liberar_rps_pendente(invoice.get("id"))
         # TODO ConsultarUrlNfse: preencher resultado.pdf_path com a URL/PDF oficial.
 
     return resultado.to_dict()
@@ -440,13 +449,37 @@ def _abrasf_endpoint() -> str:
 _COUNTER_RPS_FILE = Path(settings.nfse_output_dir) / ".contador_rps.json"
 
 
-def _proximo_numero_rps() -> str:
-    """Incrementa atomicamente o contador de RPS (série 3) e retorna sem zeros à esquerda.
+# Número de RPS "reservado" por fatura enquanto a nota não foi emitida. Entradas
+# mais velhas que isso são descartadas (fatura abandonada).
+_RPS_PENDENTE_TTL_SEGUNDOS = 30 * 24 * 3600
+
+
+def _ler_contador_rps() -> dict[str, Any]:
+    if _COUNTER_RPS_FILE.exists():
+        return json.loads(_COUNTER_RPS_FILE.read_text(encoding="utf-8"))
+    return {"ultimo_numero": 0}
+
+
+def _gravar_contador_rps(data: dict[str, Any]) -> None:
+    """Grava o contador via arquivo temporário + replace (um crash não deixa JSON pela metade)."""
+    tmp = _COUNTER_RPS_FILE.with_name(_COUNTER_RPS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.replace(tmp, _COUNTER_RPS_FILE)
+
+
+def _proximo_numero_rps(invoice_id: Optional[str] = None) -> str:
+    """Devolve o número de RPS (série 3) sem zeros à esquerda, atomicamente.
 
     Reutiliza _adquirir_lock_contador/_liberar_lock_contador (lock ENTRE PROCESSOS,
     o mesmo lockfile da DPS) para evitar números duplicados quando webhook e cron de
     boletos rodam ao mesmo tempo. O número é gravado em arquivo separado
     (.contador_rps.json) para não colidir com a numeração da DPS.
+
+    Com `invoice_id`, o número fica RESERVADO para a fatura até a nota ser emitida
+    (`_liberar_rps_pendente`): reentregas do webhook / novas tentativas reusam o mesmo
+    número em vez de queimar um novo a cada falha. É seguro: se a ISSnet já tiver
+    aceitado aquele RPS (ex.: timeout após o processamento), ela recusa o repetido com
+    E010 "RPS já informado" — em vez de emitir uma NFS-e duplicada com número novo.
 
     ⚠️ Numeração de RPS no DF: a faixa é solicitada/consultada no portal do ISSnet
     (menu "Solicitação de Documentos Fiscais"). Este contador local deve operar
@@ -455,15 +488,52 @@ def _proximo_numero_rps() -> str:
     Path(settings.nfse_output_dir).mkdir(parents=True, exist_ok=True)
     fd = _adquirir_lock_contador()
     try:
-        if _COUNTER_RPS_FILE.exists():
-            data = json.loads(_COUNTER_RPS_FILE.read_text(encoding="utf-8"))
-        else:
-            data = {"ultimo_numero": 0}
+        data = _ler_contador_rps()
+        agora = time.time()
+        pendentes = {
+            k: v for k, v in (data.get("pendentes") or {}).items()
+            if agora - float(v.get("ts", 0)) <= _RPS_PENDENTE_TTL_SEGUNDOS
+        }
+        if invoice_id and invoice_id in pendentes:
+            numero = str(pendentes[invoice_id]["numero"])
+            logger.info(
+                f"[RPS] Reusando RPS {numero} já reservado para a fatura {invoice_id} "
+                f"(tentativa anterior sem emissão)"
+            )
+            if pendentes != (data.get("pendentes") or {}):
+                data["pendentes"] = pendentes
+                _gravar_contador_rps(data)
+            return numero
+
         data["ultimo_numero"] = int(data.get("ultimo_numero", 0)) + 1
-        _COUNTER_RPS_FILE.write_text(json.dumps(data), encoding="utf-8")
+        if invoice_id:
+            pendentes[invoice_id] = {"numero": data["ultimo_numero"], "ts": agora}
+        data["pendentes"] = pendentes
+        _gravar_contador_rps(data)
         return str(data["ultimo_numero"])
     finally:
         _liberar_lock_contador(fd)
+
+
+def _liberar_rps_pendente(invoice_id: Optional[str]) -> None:
+    """Remove a reserva de RPS da fatura (chamar quando a NFS-e foi emitida).
+
+    Best-effort: se falhar, só loga — a reserva órfã é inofensiva (a fatura já tem
+    índice de nota e o guardrail barra reemissão) e expira pelo TTL.
+    """
+    if not invoice_id:
+        return
+    try:
+        fd = _adquirir_lock_contador()
+        try:
+            data = _ler_contador_rps()
+            if invoice_id in (data.get("pendentes") or {}):
+                del data["pendentes"][invoice_id]
+                _gravar_contador_rps(data)
+        finally:
+            _liberar_lock_contador(fd)
+    except Exception as exc:
+        logger.warning(f"[RPS] Não foi possível liberar a reserva da fatura {invoice_id}: {exc}")
 
 
 # -----------------------------------------------------------------------------
@@ -554,7 +624,7 @@ def _montar_xml_rps_abrasf(
         default=cod_mun_prestador,
     )
 
-    hoje = date.today().isoformat()
+    hoje = hoje_br().isoformat()
 
     # ---------- Raiz GerarNfseEnvio > Rps > InfDeclaracaoPrestacaoServico ----------
     envio = etree.Element(f"{{{NS}}}GerarNfseEnvio", nsmap={None: NS})
@@ -1937,11 +2007,11 @@ def _montar_xml_dps(
     # ---------- Monta o DPS (base v1.00 via nfelib) ----------
     info_dps = tc.TcinfDps(
         tpAmb=tp_amb,
-        dhEmi=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+        dhEmi=agora_br().isoformat(timespec="seconds"),
         verAplic="iugu-nfse-df-0.3",
         serie=settings.nfse_serie_padrao,
         nDPS=numero_dps,
-        dCompet=date.today().isoformat(),
+        dCompet=hoje_br().isoformat(),
         tpEmit=ts.TsemitenteDps.VALUE_1,  # 1 = prestador
         cLocEmi=cod_mun_prestador,
         prest=prest,
@@ -2614,10 +2684,10 @@ def _gravar_log_nfse(
         "cnpj": empresa.cnpj,
         "razao_social": empresa.razao_social,
         "valor": valor_reais,
-        "data_emissao": date.today().isoformat(),
+        "data_emissao": hoje_br().isoformat(),
         # Mês de COMPETÊNCIA (YYYY-MM) da nota. Base da anti-duplicata retroativa
         # (guardrail Regra 2 por competência). Sem competência informada = mês atual.
-        "competencia": (competencia[:7] if competencia else date.today().isoformat()[:7]),
+        "competencia": (competencia[:7] if competencia else hoje_br().isoformat()[:7]),
         "sucesso": True,
         # Caminhos dos artefatos (string), reusados pelo reenvio de e-mail.
         "xml_enviado_path": str(resultado.xml_enviado_path) if resultado.xml_enviado_path else None,
@@ -2658,7 +2728,7 @@ def _gravar_log_nfse(
             f"ANTI-DUPLICATA — sem ele, um reprocessamento desta fatura pode emitir uma "
             f"NFS-e DUPLICADA. AÇÃO MANUAL NECESSÁRIA: recriar/gravar o índice "
             f"nfse_{invoice_id}.json (CNPJ {empresa.cnpj}, valor R$ {valor_reais:.2f}, "
-            f"data {date.today().isoformat()}) e NÃO reprocessar a fatura {invoice_id} "
+            f"data {hoje_br().isoformat()}) e NÃO reprocessar a fatura {invoice_id} "
             f"antes de confirmar que a nota já existe no provedor."
         )
         # (C4) FALLBACK best-effort: tenta gravar um índice MÍNIMO no MESMO caminho
@@ -2676,8 +2746,8 @@ def _gravar_log_nfse(
                 "codigo_verificacao": resultado.codigo_verificacao,
                 "cnpj": empresa.cnpj,
                 "valor": valor_reais,
-                "data_emissao": date.today().isoformat(),
-                "competencia": (competencia[:7] if competencia else date.today().isoformat()[:7]),
+                "data_emissao": hoje_br().isoformat(),
+                "competencia": (competencia[:7] if competencia else hoje_br().isoformat()[:7]),
             }
             caminho_min.write_text(
                 json.dumps(indice_minimo, ensure_ascii=False),

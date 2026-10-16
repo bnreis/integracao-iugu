@@ -42,3 +42,4 @@ PyJWT>=2.8.0               # Tokens JWT para autenticação
 # --- Utilidades ---
 loguru>=0.7.2              # Logging mais agradável
 python-dateutil>=2.9.0     # Manipulação de datas
+tzdata>=2024.1             # Base de fusos p/ zoneinfo (src/tempo.py) — obrigatório no Windows

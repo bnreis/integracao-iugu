@@ -84,7 +84,7 @@ def _rodar_processar_com_emissao(resultado_emissao: dict, status: str = "paid") 
     repo.buscar_por_customer_id.return_value = empresa  # caminho primário
     repo.buscar_por_cnpj.return_value = empresa          # fallback (não deve ser usado aqui)
 
-    async def fake_emitir(invoice, empresa):  # noqa: ARG001
+    async def fake_emitir(invoice, empresa, competencia=None):  # noqa: ARG001
         return resultado_emissao
 
     with patch.object(webhook_server, "IuguClient") as MockClient, \
@@ -167,7 +167,7 @@ def teste_auto_envio_email_com_anexo() -> None:
     repo.buscar_por_customer_id.return_value = empresa
     repo.buscar_por_cnpj.return_value = empresa
 
-    async def fake_emitir(invoice, empresa):  # noqa: ARG001
+    async def fake_emitir(invoice, empresa, competencia=None):  # noqa: ARG001
         return resultado_emissao
 
     with patch.object(webhook_server, "IuguClient") as MockClient, \
@@ -277,7 +277,7 @@ def teste_guardrail_janela_mes() -> None:
             settings.nfse_output_dir = orig
 
     _check("duplicata detectada via mês de hoje", res is not None)
-    _check("fonte == 'duplicata_mes_valor'", (res or {}).get("fonte") == "duplicata_mes_valor")
+    _check("fonte == 'duplicata_cliente_mes'", (res or {}).get("fonte") == "duplicata_cliente_mes")
 
 
 def teste_lock_invoice_bloqueia_emissao() -> None:
@@ -297,7 +297,7 @@ def teste_lock_invoice_bloqueia_emissao() -> None:
     repo.buscar_por_cnpj.return_value = empresa
     emitiu = {"chamado": False}
 
-    async def fake_emitir(invoice, empresa):  # noqa: ARG001
+    async def fake_emitir(invoice, empresa, competencia=None):  # noqa: ARG001
         emitiu["chamado"] = True
         return {"sucesso": True, "numero_nfse": "999"}
 
@@ -347,7 +347,7 @@ def teste_lock_obsoleto_recupera_e_emite() -> None:
     repo.buscar_por_cnpj.return_value = empresa
     emitiu = {"chamado": False}
 
-    async def fake_emitir(invoice, empresa):  # noqa: ARG001
+    async def fake_emitir(invoice, empresa, competencia=None):  # noqa: ARG001
         emitiu["chamado"] = True
         return {"sucesso": True, "numero_nfse": "777"}
 
@@ -397,7 +397,7 @@ def teste_lock_liberado_permite_segunda_emissao() -> None:
     repo.buscar_por_cnpj.return_value = empresa
     chamadas = {"n": 0}
 
-    async def fake_emitir(invoice, empresa):  # noqa: ARG001
+    async def fake_emitir(invoice, empresa, competencia=None):  # noqa: ARG001
         chamadas["n"] += 1
         return {"sucesso": True, "numero_nfse": str(chamadas["n"])}
 
@@ -442,7 +442,7 @@ def teste_cron_sob_lock_ocupado_nao_emite() -> None:
                                  sucesso=True, invoice_id="INV_CRON")
     emitiu = {"chamado": False}
 
-    async def fake_emitir(invoice, empresa):  # noqa: ARG001
+    async def fake_emitir(invoice, empresa, competencia=None):  # noqa: ARG001
         emitiu["chamado"] = True
         return {"sucesso": True, "numero_nfse": "555"}
 

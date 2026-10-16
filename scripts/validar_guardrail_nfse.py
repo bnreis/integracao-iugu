@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-from datetime import date
+from datetime import date  # noqa: F401
 from pathlib import Path
 
 # Permite importar o pacote src/ rodando da raiz do projeto.
@@ -29,8 +29,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import settings  # noqa: E402
 from src.nfse_guard import _verificar_nfse_duplicada  # noqa: E402
+from src.tempo import hoje_br  # noqa: E402
 
-MES_ATUAL = date.today().isoformat()[:7]  # "2026-06"
+MES_ATUAL = hoje_br().isoformat()[:7]  # mês de Brasília (igual ao guardrail)
 # Um mês claramente anterior (não depende do mês corrente): usa o ano-1, mês 01.
 ano_ant = int(MES_ATUAL[:4]) - 1
 MES_ANTERIOR = f"{ano_ant}-01"

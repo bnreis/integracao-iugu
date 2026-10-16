@@ -6,6 +6,21 @@
 
 ---
 
+## 🆕 16/10/2026 — E232 intermitente da ISSnet + RPS por fatura + fuso Brasília (NÃO deployado)
+
+**Diagnóstico:** emissões da MegaTeam falhavam com `E232` ("erro no processamento do arquivo") e timeouts de 60s. É **instabilidade do processamento da ISSnet**, não do nosso XML: o mesmo payload falhou 59× em 14/10 e passou em 15/10 (NFS-e 62, RPS 149); o WSDL responde 200; E232 não depende de ISS retido. Abrir chamado ISSnet/Nota Control com horários + `rps_<n>_retorno_*.xml`.
+
+**Efeitos colaterais nossos, corrigidos no código (working tree, sem commit/deploy):**
+- **RPS queimado a cada reentrega do webhook** (contador 99→189 em 3 dias): a emissão é síncrona (30–60s) e a Iugu reentrega. Agora `_proximo_numero_rps(invoice_id)` **reserva o RPS por fatura** (`pendentes` em `.contador_rps.json`, TTL 30d) e reusa até a nota sair (`_liberar_rps_pendente`). Seguro: se a ISSnet já aceitou aquele RPS, devolve `E010 RPS já informado` em vez de duplicar a nota. Formato antigo do contador continua válido.
+- **SOAP em `asyncio.to_thread`** — o httpx síncrono congelava o event loop (reentregas empilhavam).
+- **Fuso:** VPS em UTC (não mexer — compartilhada com PBX) → entre 21h–24h BRT a data de emissão era "amanhã" (E016). Novo `src/tempo.py` (`hoje_br()`/`agora_br()`); usado em `nfse_df`, `webhook_server` e **`nfse_guard.py:272` (mês de hoje do guardrail)**. Fora do escopo: `api_routes.py` (dashboard/vencimento) e `scheduled_invoices.py`.
+- `requirements.txt` ganhou `tzdata` (obrigatório no Windows). **Na VPS: `pip install -r requirements.txt` antes do restart** (o Linux já tem tzdata do sistema, mas confirme `zoneinfo`).
+- Testes: `tests/test_rps_fuso.py` (novo, 24 checagens), `scripts/validar_guardrail_nfse.py` (9/9). `tests/test_webhook_status.py` estava quebrado desde o commit `98c0b9b` (fakes sem `competencia`) — corrigido; resta 1 falha que depende de arquivo local da VPS.
+
+**Pendências:** deploy nas duas instâncias; reemitir ABRIG (R$580), KEMMI (R$2.200) e FIPECQ (R$3.276) quando a ISSnet estabilizar — **antes, conferir no portal da ISSnet se alguma tentativa com timeout gerou a nota**. Responder 200 rápido + emitir em background (muda o contrato do webhook) ficou como follow-up.
+
+---
+
 ## 🆕 18/08/2026 — DANFSE (PDF) no e-mail + branding por empresa — NO AR
 
 Três entregas, todas **commitadas e deployadas nas duas instâncias** (validado: serviços `active`, `/health` OK, branding isolado por empresa).

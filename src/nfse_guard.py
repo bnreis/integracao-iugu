@@ -21,13 +21,13 @@ import os
 import re
 import time
 from contextlib import contextmanager
-from datetime import date
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from .config import settings
+from .tempo import hoje_br
 
 
 # ============================================================
@@ -251,7 +251,7 @@ def _verificar_nfse_duplicada(
     # emissão. INDEPENDENTE do valor/fatura (a regra antiga exigia mesmo valor e
     # deixava passar: 2ª fatura com valor diferente, e cancelada+recriada com ISS
     # retido — log=bruto, fatura=líquido). Vale para emissão automática E manual.
-    # (M2) O log grava data_emissao = date.today(), mas a fatura traz paid_at. Num
+    # (M2) O log grava data_emissao = hoje_br(), mas a fatura traz paid_at. Num
     # reprocessamento na virada do mês esses dois meses divergem — então casamos o
     # mês do log com QUALQUER um dos dois: o mês do pagamento OU o mês de hoje.
     # Cross-mês (cancelar num mês e refazer no outro) NÃO é coberto aqui de
@@ -269,7 +269,7 @@ def _verificar_nfse_duplicada(
             # Caminho normal (INALTERADO): 1 NFS-e por CNPJ por MÊS DE EMISSÃO,
             # casando o mês do log com o mês do pagamento OU o mês de hoje.
             mes_pagamento = (invoice.get("paid_at") or "")[:7]  # "2026-04"
-            mes_hoje = date.today().isoformat()[:7]
+            mes_hoje = hoje_br().isoformat()[:7]
             meses_validos = {m for m in (mes_pagamento, mes_hoje) if len(m) >= 7}
 
         if cnpj_norm and meses_validos:

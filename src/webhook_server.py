@@ -26,7 +26,6 @@ Para expor publicamente (webhooks + app):
 from __future__ import annotations
 
 import secrets
-from datetime import date
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -38,6 +37,7 @@ from .auth import usuario_autenticado
 from .config import settings
 from .iugu_client import IuguAPIError, IuguClient, extract_cnpj_from_invoice
 from .iugu_empresas import get_repo
+from .tempo import hoje_br
 
 # M1 — lock cross-process por fatura + guardrail anti-duplicata. Movidos para o
 # módulo neutro src/nfse_guard.py (ADR: cron e webhook compartilham a MESMA
@@ -410,7 +410,7 @@ async def processar_pagamento(
                 dados_email = {
                     **resultado_nfse,
                     "valor": round(total_cents / 100.0, 2),
-                    "data_emissao": date.today().isoformat(),
+                    "data_emissao": hoje_br().isoformat(),
                     "razao_social": empresa.razao_social,
                 }
                 enviar_nfse_email(empresa, dados_email)
