@@ -6,7 +6,9 @@
 
 ---
 
-## 🆕 16/10/2026 — E232 intermitente da ISSnet + RPS por fatura + fuso Brasília (NÃO deployado)
+## 🆕 16/10/2026 — E232 intermitente da ISSnet + RPS por fatura + fuso Brasília (DEPLOYADO só na MegaTeam, commit `87c0588`)
+
+> **Deploy 16/10 ~21h (BRT):** push + `git pull --ff-only` + restart de `iugu-webhook-megateam` (PID novo, sem erros). Validado pelo domínio público: `/megateam/health` 200, `/health` 200 (8000), webhook com token inválido → 401 na instância 8001; ProxyPass conferido. Testes offline rodaram na VPS (24/24) e o contador real seguiu em 189. **MegaSuporte (`/opt/integracao-iugu`, desativada) ficou em `0d8ad72`** — não atualizada de propósito. `pip install` não foi necessário (zoneinfo usa o tzdata do sistema).
 
 **Diagnóstico:** emissões da MegaTeam falhavam com `E232` ("erro no processamento do arquivo") e timeouts de 60s. É **instabilidade do processamento da ISSnet**, não do nosso XML: o mesmo payload falhou 59× em 14/10 e passou em 15/10 (NFS-e 62, RPS 149); o WSDL responde 200; E232 não depende de ISS retido. Abrir chamado ISSnet/Nota Control com horários + `rps_<n>_retorno_*.xml`.
 
