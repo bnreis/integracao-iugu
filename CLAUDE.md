@@ -27,6 +27,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **`docs/fase2_nfse_df.md`** — detalhes técnicos da Fase 2 (operação SOAP, padrões, endpoints).
 3. **`docs/scheduling.md`** — Task Scheduler para boletos recorrentes (Fase 1).
 4. **`docs/deploy_vps.md`** — runbook vivo do deploy na VPS (Fase 3). Executar **um bloco por vez** no SSH, confirmando a saída antes do próximo.
+5. **`docs/BASE_CONHECIMENTO_INCIDENTES.md`** ⭐ — **base de conhecimento de problemas já resolvidos** (sintoma → causa → correção → documento). **Consulte antes de investigar um erro** e **sempre documente** todo problema novo investigado/resolvido: crie `docs/incidente_<tema>_<AAAA-MM>.md` (modelo no próprio índice) e adicione a linha na tabela. Registre hipóteses não provadas e pendências.
 
 > ⚠️ **`README.md` está desatualizado** — ainda lista Fase 2 como "não iniciada" e menciona Flutter. **Não confie nele para estado atual**; use HANDOFF + este CLAUDE.md.
 
