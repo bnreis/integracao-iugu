@@ -15,6 +15,7 @@ diagnóstico passo a passo e a receita de correção.
 
 | Data | Sintoma / erro exato | Causa-raiz (resumo) | Resolução | Documento |
 |---|---|---|---|---|
+| 2026-11-05 → | `L120 Não é permitido emitir NFSe através deste serviço na data de competência informada… Simples Nacional… ≥ 01/11/2026` (+ `L039`) — **todas** as emissões | ISSnet/DF não aceita mais RPS ABRASF de optante Simples com competência ≥ 01/11/2026; exige Emissor Nacional / API do Ambiente Nacional | 🟠 **Em aberto em produção** — API Nacional **provada em homologação** (12/11, NFS-e de teste nº 1; 9 ajustes de leiaute listados no doc). Falta implementar; enquanto isso: portal nacional ou competência retroativa (contador) | [incidente_l120_simples_nacional_2026-11.md](incidente_l120_simples_nacional_2026-11.md) |
 | 2026-10-14 a 17 | `E232 Ocorreu um erro no processamento do arquivo`; `ReadTimeout`; contador de RPS disparando (99→189) | **ISSnet instável** (externo) + RPS consumido a cada reentrega do webhook + SOAP bloqueando o event loop | Reserva de RPS por fatura, SOAP em `to_thread`; ISSnet normalizou sozinha | [incidente_e232_issnet_rps_fuso_2026-10.md](incidente_e232_issnet_rps_fuso_2026-10.md) |
 | 2026-10-14/15 | `E016 A data da emissão do RPS não poderá ser superior a data de hoje` (+ `L016`) à noite | VPS em UTC: entre 21h–24h (Brasília) `date.today()` já era "amanhã" | `src/tempo.py` (`hoje_br()`), incl. `nfse_guard.py:272`; fuso da VPS **não** alterado | mesmo documento acima |
 | 2026-07-17 | Painel mostrava os mesmos dados nas duas empresas (MegaSuporte × MegaTeam) | `ProxyPass` do Apache apontando `/api /auth /webhook /health` para a porta 8001 | Corrigir vhost; diagnosticar **pelo domínio público autenticado**, conferir todas as linhas `ProxyPass` | [incidente_multiempresa_apache_2026-07.md](incidente_multiempresa_apache_2026-07.md) |
@@ -26,6 +27,8 @@ diagnóstico passo a passo e a receita de correção.
 
 | Código | Mensagem | O que fazer |
 |---|---|---|
+| `L120` | Competência ≥ 01/11/2026 não permitida no serviço ABRASF p/ Simples Nacional | Não reemitir (não adianta). Ver `incidente_l120_simples_nacional_2026-11.md`. |
+| `L039` | Prestador sem autorização p/ essa natureza de operação | Costuma vir junto do L120; tratar o L120. |
 | `E232` | Erro no processamento do arquivo | Se o XML é igual ao de uma nota aceita → externo; aguardar/abrir chamado. Não reemitir em loop. |
 | `E016` | Data de emissão do RPS maior que hoje | Fuso (ver `src/tempo.py`). |
 | `E010` | RPS já informado | A ISSnet já aceitou esse RPS → **conferir a nota no portal** e usar "Marcar como emitida"; não reemitir. |
