@@ -12,8 +12,11 @@ Os corpos de resposta e a DPS de exemplo são os REAIS do teste em homologação
 """
 from __future__ import annotations
 
+import base64
+import gzip
 import os
 import sys
+import tempfile
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -108,8 +111,114 @@ def teste_ajuste_leiaute() -> None:
     _check("competência de mês passado = último dia do mês", _texto(passado, "dCompet") == "2026-10-31")
 
 
+CHAVE = "53001082227987745000142000000000000126112332975926"
+NFSE_XML = (
+    '<?xml version="1.0" encoding="utf-8"?><NFSe versao="1.01" xmlns="http://www.sped.fazenda.gov.br/nfse">'
+    f'<infNFSe Id="NFS{CHAVE}"><xLocEmi>Brasília</xLocEmi><nNFSe>1</nNFSe><cStat>100</cStat></infNFSe></NFSe>'
+)
+
+
+def _gzip_b64(texto: str) -> str:
+    return base64.b64encode(gzip.compress(texto.encode("utf-8"))).decode()
+
+
+RESP_201 = {"tipoAmbiente": 2, "versaoAplicativo": "SefinNacional_1.6.0", "idDps": "NFS" + CHAVE,
+            "chaveAcesso": CHAVE, "nfseXmlGZipB64": _gzip_b64(NFSE_XML), "alertas": None}
+ERRO_E0625 = {"tipoAmbiente": 2, "idDPS": DPS_ID, "erros": [{
+    "Codigo": "E0625", "Descricao": "Não é permitido informar alíquota quando não há indicação de retenção do ISSQN",
+    "Complemento": None}]}
+ERRO_E2404 = {"tipoAmbiente": 0, "erro": {
+    "codigo": "E2404", "descricao": "Não foi gerada uma NFS-e com o identificador de DPS informado"}}
+
+
+def teste_transporte() -> None:
+    print("2) Sefin — empacotamento e leitura da resposta:")
+    xml = "<DPS>ç</DPS>"
+    pacote = nfse_df._empacotar_dps(xml)
+    _check("ida e volta gzip+b64, com declaração XML",
+           nfse_df._desempacotar_xml(pacote) == '<?xml version="1.0" encoding="UTF-8"?>' + xml)
+    _check("declaração XML não é duplicada",
+           nfse_df._desempacotar_xml(nfse_df._empacotar_dps('<?xml version="1.0" encoding="UTF-8"?>' + xml)).count("<?xml") == 1)
+
+    ok = nfse_df._parsear_resposta_sefin(201, RESP_201)
+    _check("201 -> sucesso, número e chave",
+           ok["sucesso"] and ok["numero_nfse"] == "1" and ok["chave_acesso"] == CHAVE and ok["xml_nfse"] == NFSE_XML)
+    rej = nfse_df._parsear_resposta_sefin(400, ERRO_E0625)
+    _check("400 -> erro com código e descrição",
+           not rej["sucesso"] and "E0625" in rej["mensagem_erro"] and "alíquota" in rej["mensagem_erro"])
+    compl = nfse_df._parsear_resposta_sefin(400, {"erros": [
+        {"Codigo": "E1235", "Descricao": "Falha no esquema XML do DF-e.", "Complemento": "cLocEmi inválido"}]})
+    _check("complemento do erro aparece", "cLocEmi inválido" in compl["mensagem_erro"])
+    um = nfse_df._parsear_resposta_sefin(404, ERRO_E2404)
+    _check("formato 'erro' (minúsculo) também é lido", not um["sucesso"] and "E2404" in um["mensagem_erro"])
+    _check("201 sem XML não é sucesso", not nfse_df._parsear_resposta_sefin(201, {"chaveAcesso": CHAVE})["sucesso"])
+    _check("200 com XML não é emissão (só 201)", not nfse_df._parsear_resposta_sefin(200, RESP_201)["sucesso"])
+    vazio = nfse_df._parsear_resposta_sefin(500, {})
+    _check("corpo vazio -> erro citando o HTTP", not vazio["sucesso"] and "500" in vazio["mensagem_erro"])
+
+
+class _RespFake:
+    def __init__(self, status: int, texto: str):
+        self.status_code, self.text = status, texto
+
+    def json(self):
+        import json as _json
+        return _json.loads(self.text)
+
+
+class _ClientFake:
+    """Substitui httpx.Client: registra a chamada e devolve a resposta programada."""
+    chamadas: list = []
+    resposta = None
+
+    def __init__(self, **kw):
+        _ClientFake.kw = kw
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def request(self, metodo, url, json=None):
+        _ClientFake.chamadas.append((metodo, url, json))
+        return _ClientFake.resposta
+
+
+def teste_nao_json() -> None:
+    print("3) _sefin_request — mTLS e respostas que não são JSON:")
+    with tempfile.TemporaryDirectory() as t:
+        cert, key = Path(t) / "c.pem", Path(t) / "k.pem"
+        cert.write_text("c"), key.write_text("k")
+        _ClientFake.chamadas = []
+        with patch.object(nfse_df, "_pkcs12_to_pem_tempfiles", return_value=(cert, key)), \
+                patch.object(nfse_df.httpx, "Client", _ClientFake), \
+                patch.object(nfse_df.settings, "nfse_ambiente", "homologacao"):
+            _ClientFake.resposta = _RespFake(403, "<html><body>403 - Forbidden</body></html>")
+            status, corpo = nfse_df._sefin_request("GET", "/nfse/x")
+            _check("HTML 403 não explode e vira erro legível",
+                   status == 403 and corpo["erro"]["codigo"] == "HTTP403" and "<html" in corpo["erro"]["descricao"])
+            _check("URL = base de homologação + caminho", _ClientFake.chamadas[-1][1]
+                   == "https://sefin.producaorestrita.nfse.gov.br/SefinNacional/nfse/x")
+            _check("usa o A1 (mTLS) e não desliga a verificação TLS",
+                   _ClientFake.kw.get("cert") == (str(cert), str(key)) and _ClientFake.kw.get("verify", True) is not False)
+            _check("PEMs temporários removidos", not cert.exists() and not key.exists())
+
+            cert.write_text("c"), key.write_text("k")
+            _ClientFake.resposta = _RespFake(201, '{"chaveAcesso": "1"}')
+            status, corpo = nfse_df._sefin_request("POST", "/nfse", {"dpsXmlGZipB64": "abc"})
+            _check("JSON devolvido como dict e corpo enviado como JSON",
+                   (status, corpo) == (201, {"chaveAcesso": "1"})
+                   and _ClientFake.chamadas[-1][2] == {"dpsXmlGZipB64": "abc"})
+        with patch.object(nfse_df.settings, "nfse_ambiente", "producao"):
+            _check("produção aponta para sefin.nfse.gov.br",
+                   nfse_df._sefin_base() == "https://sefin.nfse.gov.br/SefinNacional")
+
+
 if __name__ == "__main__":
     teste_ajuste_leiaute()
+    teste_transporte()
+    teste_nao_json()
     print()
     if _falhas:
         print(f"{_falhas} verificação(ões) FALHARAM.")

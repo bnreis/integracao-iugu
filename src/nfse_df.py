@@ -1420,6 +1420,100 @@ def baixar_pdf_nfse(url: str) -> Optional[bytes]:
 # apenas movido para um backend nomeado, SEM qualquer mudança de lógica. Continua
 # sendo o caminho de produção atual (settings.nfse_padrao="nacional", default).
 # =============================================================================
+# =============================================================================
+# SEFIN NACIONAL (REST) — transporte do backend "nacional"
+# =============================================================================
+# API do Emissor Nacional: mTLS com o A1 + JSON {"dpsXmlGZipB64": gzip+base64 da DPS
+# assinada}. Rotas usadas: POST /nfse, GET /nfse/{chave}, GET /dps/{idDps}.
+# Respostas reais em docs/incidente_l120_simples_nacional_2026-11.md (seção 8).
+# =============================================================================
+def _sefin_base() -> str:
+    """URL base da API da Sefin Nacional conforme o ambiente configurado."""
+    if settings.nfse_ambiente == "producao":
+        return settings.nfse_sefin_url_producao.rstrip("/")
+    return settings.nfse_sefin_url_homologacao.rstrip("/")
+
+
+def _empacotar_dps(xml_assinado: str) -> str:
+    """DPS assinada -> gzip + base64 (campo dpsXmlGZipB64), com declaração XML."""
+    import base64
+    import gzip
+
+    if not xml_assinado.lstrip().startswith("<?xml"):
+        xml_assinado = '<?xml version="1.0" encoding="UTF-8"?>' + xml_assinado
+    return base64.b64encode(gzip.compress(xml_assinado.encode("utf-8"))).decode("ascii")
+
+
+def _desempacotar_xml(b64: str) -> str:
+    """Inverso de _empacotar_dps (usado no nfseXmlGZipB64 da resposta)."""
+    import base64
+    import gzip
+
+    return gzip.decompress(base64.b64decode(b64)).decode("utf-8")
+
+
+def _sefin_request(
+    metodo: str, caminho: str, corpo: Optional[dict[str, Any]] = None
+) -> tuple[int, dict[str, Any]]:
+    """Chama a Sefin Nacional com mTLS (A1). Devolve (status HTTP, corpo como dict).
+
+    Resposta que não é JSON (HTML de 403/404/5xx) vira {"erro": {...}} em vez de
+    exceção. Erro de REDE propaga — quem chama decide (e mantém a reserva da DPS).
+    """
+    cert_file, key_file = _pkcs12_to_pem_tempfiles(
+        Path(settings.nfse_certificado_path), settings.nfse_certificado_senha
+    )
+    try:
+        # verify padrão (certifi): a cadeia do gov.br valida sem o bundle da ISSnet.
+        with httpx.Client(cert=(str(cert_file), str(key_file)), timeout=60.0) as client:
+            resp = client.request(metodo, _sefin_base() + caminho, json=corpo)
+    finally:
+        for f in (cert_file, key_file):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    try:
+        dados = resp.json()
+    except ValueError:
+        dados = None
+    if not isinstance(dados, dict):
+        dados = {"erro": {"codigo": f"HTTP{resp.status_code}", "descricao": (resp.text or "")[:300]}}
+    return resp.status_code, dados
+
+
+def _parsear_resposta_sefin(status: int, corpo: dict[str, Any]) -> dict[str, Any]:
+    """Interpreta a resposta do POST /nfse. Emissão só é sucesso com 201 + chave + XML."""
+    info: dict[str, Any] = {
+        "sucesso": False, "numero_nfse": None, "chave_acesso": corpo.get("chaveAcesso"),
+        "xml_nfse": None, "mensagens": [], "mensagem_erro": None,
+    }
+    erros = list(corpo.get("erros") or [])
+    if corpo.get("erro"):
+        erros.append(corpo["erro"])
+    for e in erros:
+        codigo = e.get("Codigo") or e.get("codigo") or "?"
+        texto = f"{codigo} — {e.get('Descricao') or e.get('descricao') or ''}".strip()
+        complemento = e.get("Complemento") or e.get("complemento")
+        info["mensagens"].append(f"{texto} ({complemento})" if complemento else texto)
+
+    if status == 201 and info["chave_acesso"] and corpo.get("nfseXmlGZipB64"):
+        from lxml import etree
+
+        info["xml_nfse"] = _desempacotar_xml(corpo["nfseXmlGZipB64"])
+        raiz = etree.fromstring(info["xml_nfse"].encode("utf-8"), _get_safe_xml_parser())
+        numero = raiz.find(f".//{{{NFSE_NS}}}nNFSe")
+        info["numero_nfse"] = numero.text if numero is not None else None
+        info["sucesso"] = True
+        info["mensagens"] = [str(a) for a in (corpo.get("alertas") or [])]
+        return info
+
+    info["mensagem_erro"] = (
+        "; ".join(info["mensagens"]) or f"Sefin Nacional respondeu HTTP {status} sem NFS-e"
+    )
+    return info
+
+
 async def _emitir_nacional(
     invoice: dict[str, Any], empresa: Empresa, competencia: Optional[str] = None
 ) -> dict[str, Any]:
