@@ -253,7 +253,8 @@ class _Cenario:
             raise r
         return r
 
-    def emitir(self, invoice_id: str = "INV_A", competencia=None) -> dict:
+    def emitir(self, invoice_id: str = "INV_A", competencia=None,
+               cidade: str = "Brasília", uf: str = "DF") -> dict:
         real_to_thread = asyncio.to_thread
 
         async def espia(fn, *a, **k):
@@ -262,8 +263,8 @@ class _Cenario:
 
         empresa = nfse_df.Empresa(cnpj="36342291000143", razao_social="MEGASUPORTE SERVICOS DE TI LTDA",
                                   email="", codigo_servico="010701", descricao_servico="TESTE", aliquota_iss=2.0)
-        invoice = {"id": invoice_id, "total_cents": 100, "payer_address_city": "Brasília",
-                   "payer_address_state": "DF", "payer_address_zip_code": "70040010"}
+        invoice = {"id": invoice_id, "total_cents": 100, "payer_address_city": cidade,
+                   "payer_address_state": uf, "payer_address_zip_code": "70040010"}
         s, n, t = nfse_df.settings, nfse_df, self.tmp
         with patch.object(s, "nfse_output_dir", str(t)), patch.object(s, "nfse_padrao", "nacional"), \
                 patch.object(s, "nfse_ambiente", "homologacao"), patch.object(s, "nfse_dry_run", self.dry_run), \
@@ -316,29 +317,109 @@ def teste_emissao() -> None:
         c.emitir(invoice_id="INV_B")
         _check("outra fatura recebe outro número", c.ids_montados[2] != c.ids_montados[0])
 
+    timeout = httpx.ReadTimeout("tempo esgotado")
+    ja_existe = (200, {"chaveAcesso": CHAVE})
+    nota = (200, {"chaveAcesso": CHAVE, "nfseXmlGZipB64": _gzip_b64(NFSE_XML)})
+
+    # Fluxo real da recuperação: 1ª tentativa dá timeout depois do aceite; a 2ª reusa o
+    # MESMO número (reserva), acha a nota na Sefin e a adota sem reenviar.
     with tempfile.TemporaryDirectory() as t:
-        c = _Cenario(Path(t), [(200, {"chaveAcesso": CHAVE}),
-                               (200, {"chaveAcesso": CHAVE, "nfseXmlGZipB64": _gzip_b64(NFSE_XML)})])
-        r = c.emitir()
-        _check("recupera_sem_reenviar: nota já aceita é recuperada, sem POST",
-               r["sucesso"] and r["chave_acesso"] == CHAVE and r["numero_nfse"] == "1"
-               and c.chamadas == [("GET", "/dps/" + c.ids_montados[0]), ("GET", "/nfse/" + CHAVE)])
+        c = _Cenario(Path(t), [(404, ERRO_E2404), timeout, ja_existe, nota])
+        r1 = c.emitir()
+        _check("timeout -> falha sem exceção, reserva mantida",
+               not r1["sucesso"] and "Sefin" in r1["mensagem_erro"] and "INV_A" in c.pendentes_dps())
+        _check("timeout depois do envio avisa que a nota pode existir e para NÃO emitir no portal",
+               "pode ter sido aceita" in r1["mensagem_erro"] and "NÃO emita" in r1["mensagem_erro"])
+        r2 = c.emitir()
+        _check("recupera_sem_reenviar: 2ª tentativa adota a nota já aceita, sem novo POST",
+               r2["sucesso"] and r2["chave_acesso"] == CHAVE and r2["numero_nfse"] == "1"
+               and c.ids_montados[0] == c.ids_montados[1]
+               and [m for m, _ in c.chamadas] == ["GET", "POST", "GET", "GET"]
+               and c.chamadas[3] == ("GET", "/nfse/" + CHAVE))
         _check("recuperação grava o índice e libera a reserva",
                (Path(t) / "nfse_INV_A.json").exists() and "INV_A" not in c.pendentes_dps())
 
+    # C1: número RECÉM-alocado que já existe na Sefin = contador local atrasado. Nunca
+    # adotar (em cobrança recorrente, mesmo tomador + mesmo valor é a nota do mês anterior).
     with tempfile.TemporaryDirectory() as t:
-        outra = _gzip_b64(_nfse_xml(cnpj_tomador="11222333000181"))
-        c = _Cenario(Path(t), [(200, {"chaveAcesso": CHAVE}), (200, {"chaveAcesso": CHAVE, "nfseXmlGZipB64": outra})])
+        c = _Cenario(Path(t), [ja_existe, (404, ERRO_E2404), (201, RESP_201)])
         r = c.emitir()
-        _check("nota existente de OUTRO tomador não é adotada (número de DPS reaproveitado)",
-               not r["sucesso"] and CHAVE in r["mensagem_erro"] and not (Path(t) / "nfse_INV_A.json").exists()
-               and all(m != "POST" for m, _ in c.chamadas))
+        _check("número novo que já existe na Sefin NÃO é adotado, mesmo com tomador e valor iguais",
+               not r["sucesso"] and "contador" in r["mensagem_erro"] and CHAVE in r["mensagem_erro"]
+               and c.chamadas == [("GET", "/dps/" + c.ids_montados[0])]
+               and not (Path(t) / "nfse_INV_A.json").exists())
+        _check("...e a reserva desse número é solta, para a próxima tentativa pegar o seguinte",
+               "INV_A" not in c.pendentes_dps())
+        r = c.emitir()
+        _check("...próxima tentativa usa o número seguinte e emite",
+               r["sucesso"] and c.ids_montados[1] != c.ids_montados[0] and c.chamadas[-1] == ("POST", "/nfse"))
 
     with tempfile.TemporaryDirectory() as t:
-        c = _Cenario(Path(t), [(404, ERRO_E2404), httpx.ReadTimeout("tempo esgotado")])
+        outra = (200, {"chaveAcesso": CHAVE, "nfseXmlGZipB64": _gzip_b64(_nfse_xml(cnpj_tomador="11222333000181"))})
+        c = _Cenario(Path(t), [(404, ERRO_E2404), timeout, ja_existe, outra])
+        c.emitir()
         r = c.emitir()
-        _check("timeout -> falha sem exceção, reserva mantida",
-               not r["sucesso"] and "Sefin" in r["mensagem_erro"] and "INV_A" in c.pendentes_dps())
+        _check("nota existente de OUTRO tomador não é adotada",
+               not r["sucesso"] and "não confere" in r["mensagem_erro"] and CHAVE in r["mensagem_erro"]
+               and not (Path(t) / "nfse_INV_A.json").exists()
+               and [m for m, _ in c.chamadas].count("POST") == 1)
+
+    # I5: a nota existe mas o XML não veio — é falha de consulta, não "não confere".
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(404, ERRO_E2404), timeout, ja_existe,
+                               (503, {"erro": {"codigo": "HTTP503", "descricao": "indisponível"}})])
+        c.emitir()
+        r = c.emitir()
+        _check("nota existe mas XML indisponível -> mensagem de consulta, reserva mantida, sem POST",
+               not r["sucesso"] and "não confere" not in r["mensagem_erro"] and CHAVE in r["mensagem_erro"]
+               and "NÃO emita" in r["mensagem_erro"] and "INV_A" in c.pendentes_dps()
+               and [m for m, _ in c.chamadas].count("POST") == 1)
+
+    # I2: só envia quando a Sefin CONFIRMA (404) que a DPS não existe.
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(500, {"erro": {"codigo": "HTTP500", "descricao": "<html>erro</html>"}})])
+        r = c.emitir()
+        _check("consulta da DPS sem resposta clara (500) -> NÃO envia, reserva mantida",
+               not r["sucesso"] and "Nada foi enviado" in r["mensagem_erro"]
+               and c.chamadas == [("GET", "/dps/" + c.ids_montados[0])] and "INV_A" in c.pendentes_dps())
+
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [httpx.ConnectError("sem rede")])
+        r = c.emitir()
+        _check("queda antes do envio -> mensagem diz que nada foi enviado",
+               not r["sucesso"] and "Nada foi enviado" in r["mensagem_erro"]
+               and "pode ter sido aceita" not in r["mensagem_erro"])
+
+    # I1: a reserva da DPS não expira (reserva perdida depois do aceite = nota duplicada).
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(404, ERRO_E2404), timeout, ja_existe, nota])
+        c.emitir()
+        f = Path(t) / ".contador_dps.json"
+        data = json.loads(f.read_text(encoding="utf-8"))
+        data["pendentes"]["INV_A"]["ts"] -= nfse_df._RPS_PENDENTE_TTL_SEGUNDOS + 86400
+        f.write_text(json.dumps(data), encoding="utf-8")
+        r = c.emitir()
+        _check("reserva de DPS com mais de 30 dias ainda vale: mesmo número, nota recuperada",
+               r["sucesso"] and c.ids_montados[0] == c.ids_montados[1]
+               and [m for m, _ in c.chamadas].count("POST") == 1)
+
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(404, ERRO_E2404), (201, RESP_201)])
+        with patch.object(nfse_df, "_gravar_log_nfse", return_value=None):
+            r = c.emitir()
+        _check("índice da nota não gravado -> reserva NÃO é liberada (última proteção)",
+               r["sucesso"] and "INV_A" in c.pendentes_dps())
+
+    # I4: tomador fora do DF em cidade sem código IBGE mapeado não pode sair como Brasília.
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [])
+        r = c.emitir(cidade="Anápolis", uf="GO")
+        _check("cidade fora do DF sem código IBGE -> recusa clara, nada enviado, nenhum número gasto",
+               not r["sucesso"] and "Anápolis" in r["mensagem_erro"] and c.chamadas == []
+               and not (Path(t) / ".contador_dps.json").exists())
+        c.respostas = [(404, ERRO_E2404), (201, RESP_201)]
+        _check("cidade mapeada fora do DF (São Paulo/SP) segue normalmente",
+               c.emitir(cidade="São Paulo", uf="SP")["sucesso"])
 
     with tempfile.TemporaryDirectory() as t:
         c = _Cenario(Path(t), [], dry_run=True)

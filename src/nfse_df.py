@@ -503,9 +503,12 @@ def _proximo_numero_rps(invoice_id: Optional[str] = None, arquivo: Optional[Path
     try:
         data = _ler_contador_rps(arquivo)
         agora = time.time()
+        # A reserva da DPS nacional NÃO expira: perdê-la depois de a Sefin ter aceitado a
+        # nota daria número novo e NFS-e duplicada. (No RPS a ISSnet barra com E010.)
+        ttl = _RPS_PENDENTE_TTL_SEGUNDOS if arquivo is None else float("inf")
         pendentes = {
             k: v for k, v in (data.get("pendentes") or {}).items()
-            if agora - float(v.get("ts", 0)) <= _RPS_PENDENTE_TTL_SEGUNDOS
+            if agora - float(v.get("ts", 0)) <= ttl
         }
         if invoice_id and invoice_id in pendentes:
             numero = str(pendentes[invoice_id]["numero"])
@@ -1593,8 +1596,22 @@ async def _emitir_nacional(
     resultado = ResultadoEmissao(sucesso=False, ambiente=settings.nfse_ambiente)
     invoice_id = invoice.get("id")
 
+    # Tomador fora do DF em cidade sem código IBGE mapeado cairia no default (Brasília):
+    # nota com município errado. Recusa antes de gastar número.
+    uf_tomador, cidade_tomador = endereco_tomador.get("uf") or "", endereco_tomador.get("cidade") or ""
+    if uf_tomador and uf_tomador != "DF" and not _codigo_ibge_por_cidade(cidade_tomador, uf_tomador, default=""):
+        resultado.mensagem_erro = (
+            f"Município do tomador sem código IBGE cadastrado: {cidade_tomador}/{uf_tomador}. "
+            f"Nada foi enviado. Inclua a cidade em _codigo_ibge_por_cidade (src/nfse_df.py)."
+        )
+        return resultado.to_dict()
+
     # 3. Montar a DPS (número RESERVADO por fatura, como no RPS) e ajustar ao leiaute da Sefin
     try:
+        # Só uma reserva que JÁ existia prova que a DPS deste número é desta fatura.
+        ja_reservado = bool(invoice_id) and invoice_id in (
+            _ler_contador_rps(_COUNTER_FILE).get("pendentes") or {}
+        )
         numero_dps = _proximo_numero_rps(invoice_id, arquivo=_COUNTER_FILE)
         xml_dps, dps_id = _montar_xml_dps(
             empresa=empresa,
@@ -1644,34 +1661,68 @@ async def _emitir_nacional(
     # anterior que deu timeout depois do aceite): se sim, recupera em vez de reemitir.
     # Tudo em thread: httpx é síncrono e não pode congelar o event loop do uvicorn.
     corpo: dict[str, Any] = {}
+    enviou = False
     try:
         status, corpo = await asyncio.to_thread(_sefin_request, "GET", f"/dps/{dps_id}")
         if status == 200 and corpo.get("chaveAcesso"):
             chave = corpo["chaveAcesso"]
-            _, corpo = await asyncio.to_thread(_sefin_request, "GET", f"/nfse/{chave}")
-            info = _parsear_resposta_sefin(201, {**corpo, "chaveAcesso": chave})
-            # O número de DPS pode ter sido reaproveitado (contador perdido): só adota a
-            # nota se for da MESMA operação; senão acusaria nota de outro cliente.
-            if not info["sucesso"] or not _mesma_operacao(xml_dps, info["xml_nfse"]):
-                info["sucesso"] = False
+            if not ja_reservado:
+                # Número recém-alocado que já existe na Sefin: o contador local está
+                # atrasado e a nota é de OUTRA fatura (em cobrança recorrente teria até o
+                # mesmo tomador e valor). Solta o número para a próxima tentativa avançar.
+                _liberar_rps_pendente(invoice_id, arquivo=_COUNTER_FILE)
+                info = _parsear_resposta_sefin(status, {})
                 info["mensagem_erro"] = (
-                    f"A DPS {numero_dps} (série {settings.nfse_serie_padrao}) já gerou a NFS-e de "
-                    f"chave {chave}, que não confere com esta fatura (tomador/valor). Nada foi "
-                    f"enviado. Confira a nota no portal nacional e o contador de DPS."
+                    f"O número de DPS {numero_dps} (série {settings.nfse_serie_padrao}) já foi "
+                    f"usado em outra NFS-e (chave {chave}): o contador de DPS desta máquina está "
+                    f"atrasado. Nada foi enviado. Tente de novo — a próxima tentativa usa o "
+                    f"número seguinte."
                 )
             else:
-                logger.warning(
-                    f"[NFS-e Nacional] Nota já existente recuperada para a DPS {numero_dps} "
-                    f"(chave {chave}) — nenhuma nova emissão"
-                )
-        else:
+                _, corpo = await asyncio.to_thread(_sefin_request, "GET", f"/nfse/{chave}")
+                info = _parsear_resposta_sefin(201, {**corpo, "chaveAcesso": chave})
+                if not info["sucesso"]:
+                    info["mensagem_erro"] = (
+                        f"A DPS {numero_dps} desta fatura já gerou a NFS-e de chave {chave}, mas "
+                        f"não foi possível baixar o XML dela agora "
+                        f"({info['mensagem_erro'] or 'resposta sem o XML'}). Nada foi enviado. "
+                        f"Tente de novo pelo painel e NÃO emita pelo portal."
+                    )
+                elif not _mesma_operacao(xml_dps, info["xml_nfse"]):
+                    info["sucesso"] = False
+                    info["mensagem_erro"] = (
+                        f"A DPS {numero_dps} (série {settings.nfse_serie_padrao}) já gerou a NFS-e "
+                        f"de chave {chave}, que não confere com esta fatura (tomador/valor). Nada "
+                        f"foi enviado. Confira a nota no portal nacional e o contador de DPS."
+                    )
+                else:
+                    logger.warning(
+                        f"[NFS-e Nacional] Nota já existente recuperada para a DPS {numero_dps} "
+                        f"(chave {chave}) — nenhuma nova emissão"
+                    )
+        elif status == 404:
+            # Só envia quando a Sefin CONFIRMA que esta DPS ainda não existe.
+            enviou = True
             status, corpo = await asyncio.to_thread(
                 _sefin_request, "POST", "/nfse", {"dpsXmlGZipB64": _empacotar_dps(xml_assinado)}
             )
             info = _parsear_resposta_sefin(status, corpo)
+        else:
+            info = _parsear_resposta_sefin(status, corpo)
+            info["sucesso"] = False
+            info["mensagem_erro"] = (
+                f"Não foi possível confirmar na Sefin se a DPS {numero_dps} já virou nota "
+                f"(HTTP {status}: {info['mensagem_erro'] or 'sem detalhe'}). Nada foi enviado. "
+                f"Tente de novo."
+            )
     except Exception as exc:
         logger.exception("Falha ao comunicar com a Sefin Nacional")
-        resultado.mensagem_erro = f"Erro ao enviar à Sefin Nacional: {exc}"
+        resultado.mensagem_erro = (
+            f"Erro ao enviar à Sefin Nacional: {exc}. A nota pode ter sido aceita: tente de novo "
+            f"pelo painel (a nova tentativa recupera a nota, se existir) e NÃO emita pelo portal."
+            if enviou else
+            f"Erro ao consultar a Sefin Nacional: {exc}. Nada foi enviado. Tente de novo."
+        )
         return resultado.to_dict()
 
     resultado.mensagens = info["mensagens"]
@@ -1705,9 +1756,10 @@ async def _emitir_nacional(
         f"chave {resultado.chave_acesso}"
     )
     # Índice nfse_<invoice_id>.json que a API e o guardrail leem. Resiliente por design.
-    _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_dps, competencia=competencia)
-    # Nota emitida: a reserva do número desta fatura não é mais necessária.
-    _liberar_rps_pendente(invoice_id, arquivo=_COUNTER_FILE)
+    # Só libera a reserva com o índice gravado: sem índice o guardrail não vê a nota, e a
+    # reserva é o que faz a próxima tentativa RECUPERAR em vez de emitir de novo.
+    if _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_dps, competencia=competencia):
+        _liberar_rps_pendente(invoice_id, arquivo=_COUNTER_FILE)
 
     return resultado.to_dict()
 
