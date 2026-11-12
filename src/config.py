@@ -6,7 +6,7 @@ Uso:
     print(settings.iugu_api_token)
 """
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -149,6 +149,11 @@ class Settings(BaseSettings):
     # cTribMun no leiaute nacional = 3 dígitos. DF administra 01.07.01.001 (2%, desde 27/10/2026).
     nfse_ctribmun_nacional: str = Field(
         "001", description="Código de tributação municipal no leiaute nacional (3 dígitos)"
+    )
+    # A produção restrita roda um XSD mais novo que a produção (finNFSe em infDPS, cNBS antes de
+    # xDescServ). None = automático (novo só em homologação); true quando a produção adotar.
+    nfse_sefin_leiaute_novo: Optional[bool] = Field(
+        None, description="Força o leiaute novo (produção restrita) da Sefin; None = pelo ambiente"
     )
     # Modo dry-run: monta os dados da NFS-e e loga tudo, mas NÃO gera XML nem envia
     nfse_dry_run: bool = Field(

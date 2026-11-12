@@ -2449,10 +2449,16 @@ def _ajustar_dps_para_sefin(
     # E1000/E1235: IBSCBS sai inteiro (cIndOp é placeholder; aceito p/ Simples Nacional)
     for ibs in inf.findall(q("IBSCBS")):
         inf.remove(ibs)
-    # E1235: finNFSe vai direto em infDPS, logo após tpEmit
-    fin = etree.Element(q("finNFSe"))
-    fin.text = "0"
-    inf.find(q("tpEmit")).addnext(fin)
+    # A produção restrita roda um XSD mais novo (PRODREST v1.01-20261020) que a produção
+    # (v1.01-20260209): só nele finNFSe fica em infDPS e cNBS vem antes de xDescServ.
+    # A produção recusou finNFSe com E1235 em 12/11/2026.
+    leiaute_novo = settings.nfse_sefin_leiaute_novo
+    if leiaute_novo is None:
+        leiaute_novo = settings.nfse_ambiente != "producao"
+    if leiaute_novo:
+        fin = etree.Element(q("finNFSe"))
+        fin.text = "0"
+        inf.find(q("tpEmit")).addnext(fin)
 
     # E0120 / E0121: emitente = prestador no DF -> sem IM e sem xNome do prestador
     prest = inf.find(q("prest"))
@@ -2464,9 +2470,8 @@ def _ajustar_dps_para_sefin(
     # E1235/E0312: cTribMun nacional tem 3 dígitos (o "1071" é do leiaute ISSnet)
     for el in cserv.findall(q("cTribMun")):
         el.text = settings.nfse_ctribmun_nacional
-    # E1235: cNBS vem antes de xDescServ
     nbs, desc = cserv.find(q("cNBS")), cserv.find(q("xDescServ"))
-    if nbs is not None and desc is not None:
+    if leiaute_novo and nbs is not None and desc is not None:
         cserv.remove(nbs)
         desc.addprevious(nbs)
 

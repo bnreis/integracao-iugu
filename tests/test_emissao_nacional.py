@@ -85,9 +85,31 @@ def _texto(xml: str, nome: str) -> str:
     return _no(xml, nome).text
 
 
+def teste_ajuste_leiaute_producao() -> None:
+    print("1b) _ajustar_dps_para_sefin — produção (XSD v1.01-20260209, E1235 em 12/11/2026):")
+    s = nfse_df.settings
+    with patch.object(s, "nfse_ambiente", "producao"), patch.object(s, "nfse_sefin_leiaute_novo", None):
+        x = nfse_df._ajustar_dps_para_sefin(DPS_NOTA_CONTROL)
+    _check("produção: infDPS sem finNFSe e sem IBSCBS", _filhos(x, "infDPS") == [
+        "tpAmb", "dhEmi", "verAplic", "serie", "nDPS", "dCompet", "tpEmit",
+        "cLocEmi", "prest", "toma", "serv", "valores"])
+    _check("produção: cNBS depois de xDescServ",
+           _filhos(x, "cServ") == ["cTribNac", "cTribMun", "xDescServ", "cNBS"])
+    _check("produção: prest sem IM e sem xNome", _filhos(x, "prest") == ["CNPJ", "regTrib"])
+    _check("produção: cTribMun = 001", _texto(x, "cTribMun") == "001")
+    _check("produção: sem retenção, sem pAliq", _filhos(x, "tribMun") == ["tribISSQN", "tpRetISSQN"])
+    # quando a produção adotar o leiaute da produção restrita, vira-se por .env, sem deploy
+    with patch.object(s, "nfse_ambiente", "producao"), patch.object(s, "nfse_sefin_leiaute_novo", True):
+        n = nfse_df._ajustar_dps_para_sefin(DPS_NOTA_CONTROL)
+    _check("produção com NFSE_SEFIN_LEIAUTE_NOVO=true: finNFSe após tpEmit",
+           _filhos(n, "infDPS")[6:8] == ["tpEmit", "finNFSe"]
+           and _filhos(n, "cServ") == ["cTribNac", "cTribMun", "cNBS", "xDescServ"])
+
+
 def teste_ajuste_leiaute() -> None:
-    print("1) _ajustar_dps_para_sefin — leiaute aceito pela Sefin em 12/11/2026:")
-    x = nfse_df._ajustar_dps_para_sefin(DPS_NOTA_CONTROL)
+    print("1) _ajustar_dps_para_sefin — leiaute da produção restrita (homologação) em 12/11/2026:")
+    with patch.object(nfse_df.settings, "nfse_ambiente", "homologacao"):
+        x = nfse_df._ajustar_dps_para_sefin(DPS_NOTA_CONTROL)
     _check("infDPS na ordem aceita (finNFSe após tpEmit, sem IBSCBS)", _filhos(x, "infDPS") == [
         "tpAmb", "dhEmi", "verAplic", "serie", "nDPS", "dCompet", "tpEmit",
         "finNFSe", "cLocEmi", "prest", "toma", "serv", "valores"])
@@ -495,6 +517,7 @@ def teste_email() -> None:
 
 if __name__ == "__main__":
     teste_ajuste_leiaute()
+    teste_ajuste_leiaute_producao()
     teste_transporte()
     teste_nao_json()
     teste_emissao()
