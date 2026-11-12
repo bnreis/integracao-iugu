@@ -2261,6 +2261,62 @@ def _montar_ibscbs_element(
     return ibscbs
 
 
+def _ajustar_dps_para_sefin(
+    xml: str, *, iss_retido: bool = False, competencia: Optional[str] = None
+) -> str:
+    """Adapta a DPS (leiaute Nota Control v1.01) ao leiaute da Sefin Nacional.
+
+    Cada regra veio de um erro devolvido pela Sefin em homologação (12/11/2026) —
+    tabela em docs/incidente_l120_simples_nacional_2026-11.md, seção 8.
+    """
+    from lxml import etree
+
+    def q(tag: str) -> str:
+        return f"{{{NFSE_NS}}}{tag}"
+
+    root = etree.fromstring(xml.encode("utf-8"))
+    inf = root.find(q("infDPS"))
+
+    # E1000/E1235: IBSCBS sai inteiro (cIndOp é placeholder; aceito p/ Simples Nacional)
+    for ibs in inf.findall(q("IBSCBS")):
+        inf.remove(ibs)
+    # E1235: finNFSe vai direto em infDPS, logo após tpEmit
+    fin = etree.Element(q("finNFSe"))
+    fin.text = "0"
+    inf.find(q("tpEmit")).addnext(fin)
+
+    # E0120 / E0121: emitente = prestador no DF -> sem IM e sem xNome do prestador
+    prest = inf.find(q("prest"))
+    for tag in ("IM", "xNome"):
+        for el in prest.findall(q(tag)):
+            prest.remove(el)
+
+    cserv = inf.find(f"{q('serv')}/{q('cServ')}")
+    # E1235/E0312: cTribMun nacional tem 3 dígitos (o "1071" é do leiaute ISSnet)
+    for el in cserv.findall(q("cTribMun")):
+        el.text = settings.nfse_ctribmun_nacional
+    # E1235: cNBS vem antes de xDescServ
+    nbs, desc = cserv.find(q("cNBS")), cserv.find(q("xDescServ"))
+    if nbs is not None and desc is not None:
+        cserv.remove(nbs)
+        desc.addprevious(nbs)
+
+    for trib_mun in root.iter(q("tribMun")):
+        if iss_retido:
+            trib_mun.find(q("tpRetISSQN")).text = "2"  # retido pelo tomador; pAliq fica
+        else:
+            # E0625: ME/EPP do Simples sem retenção não informa alíquota
+            for el in trib_mun.findall(q("pAliq")):
+                trib_mun.remove(el)
+
+    # Competência nunca pode ficar depois de hoje (mês corrente -> hoje)
+    data_comp = _competencia_data(competencia)
+    if data_comp:
+        inf.find(q("dCompet")).text = min(data_comp, hoje_br().isoformat())
+
+    return etree.tostring(root, encoding="unicode", xml_declaration=False)
+
+
 # =============================================================================
 # ASSINATURA DIGITAL (certificado A1 .pfx)
 # =============================================================================

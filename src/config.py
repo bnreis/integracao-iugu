@@ -136,6 +136,20 @@ class Settings(BaseSettings):
     nfse_ws_protocolo: Literal["soap", "rest"] = Field(
         "soap", description="Protocolo do webservice NFS-e DF"
     )
+    # API REST da Sefin Nacional (Emissor Nacional) — usada pelo backend "nacional".
+    # Obrigatória p/ Simples Nacional com competência >= 01/11/2026 (L120 da ISSnet).
+    nfse_sefin_url_homologacao: str = Field(
+        "https://sefin.producaorestrita.nfse.gov.br/SefinNacional",
+        description="URL base da API da Sefin Nacional em homologação (produção restrita)",
+    )
+    nfse_sefin_url_producao: str = Field(
+        "https://sefin.nfse.gov.br/SefinNacional",
+        description="URL base da API da Sefin Nacional em produção",
+    )
+    # cTribMun no leiaute nacional = 3 dígitos. DF administra 01.07.01.001 (2%, desde 27/10/2026).
+    nfse_ctribmun_nacional: str = Field(
+        "001", description="Código de tributação municipal no leiaute nacional (3 dígitos)"
+    )
     # Modo dry-run: monta os dados da NFS-e e loga tudo, mas NÃO gera XML nem envia
     nfse_dry_run: bool = Field(
         False, description="Se True, apenas monta e loga os dados da NFS-e sem gerar/enviar"
