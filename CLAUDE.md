@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Fases:**
 - **Fase 1** — webhook Iugu → empresa autorizada → decisão de emissão. ✅ Estável (validada em produção 05/06/2026).
 - **Fase 2** — emissão NFS-e DF via webservice Nota Control. **Arquitetura dual** (ADR-0005): backend nacional DPS v1.01 (`_emitir_nacional`) E backend ABRASF 2.04 RPS (`_emitir_abrasf204`) coexistem em `src/nfse_df.py`, despachados por `NFSE_PADRAO` no `.env`. Os dois validam contra seus XSDs. **Habilitação em produção concluída** (chamado Nota Control 05/06/2026) — produção atual = ABRASF 2.04 (RPS série 3, `df.issnetonline.com.br/webservicenfse204`); a virada para o Padrão Nacional vira "trocar 1 variável" em 30/06/2026. ✅ **Auto-emissão LIGADA em produção** (06/06/2026): `NFSE_PADRAO=abrasf204` na VPS. Notas reais: **#408** (SINDICONDOMINIO, manual, 05/06) e **MEGATEAM** (R$1, automática pelo painel, 06/06). **E-mail automático** ao tomador (XML anexo + link de verificação) no ar, e **guardrail anti-duplicata blindado** (lock por fatura cross-process + evidência — ADR-0006, `src/nfse_guard.py`). ⚠️ **Contador de RPS é por máquina** → emitir SÓ pela VPS (emitir local diverge e dá E010). Falta (diferido): `ConsultarUrlNfse` (PDF oficial). Detalhes em `docs/fase2_nfse_df.md` + `docs/adr/ADR-0005-abrasf-2.04-rps.md` + `docs/adr/ADR-0006-guardrail-evidencia-lock-por-fatura.md`.
+- **Fase 2 — API Nacional (ADR-0008)** — ✅ **desde 12/11/2026 a MegaTeam emite pela API REST da Sefin Nacional** (`NFSE_PADRAO=nacional`, mTLS com o A1), porque a ISSnet recusa optante do Simples Nacional com competência ≥ 11/2026 (`L120`). Isto **substitui** o que o item acima diz sobre "produção atual = ABRASF" e "trocar 1 variável": o ABRASF só atende competência retroativa (< 11/2026). Documento = DPS série 00001, contador em `nfse_emitidas/.contador_dps.json` (por máquina → emitir SÓ pela VPS). Primeira nota real: NFS-e nº 1. Não implementado: cancelamento pela API, PDF (DANFSE) no e-mail, grupo `IBSCBS`. Detalhes: `docs/adr/ADR-0008-emissao-api-nacional-sefin.md` + `docs/incidente_l120_simples_nacional_2026-11.md`.
 - **Fase 3** — Deploy na VPS Hostinger (`iugu.megasuporte.com`, IP `72.62.11.230`). ✅ Concluída — backend, painel web, HTTPS, cron e hardening de segurança no ar. ⚠️ VPS compartilhada com produção (Asterisk/PBX + Apache+PHP + MariaDB): não mexer no firewall, no fuso, nem rodar `apt upgrade`; Apache serve de proxy reverso (não instalar nginx).
 
 **Antes de qualquer ação técnica:** confira a auto-memória (carregada automaticamente) — ela contém pendências vivas como rotação de credenciais e bloqueios cadastrais no Nota Control que podem invalidar o caminho "óbvio" sugerido pelo HANDOFF.
@@ -126,7 +127,8 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
                                           assina com cert A1, envia SOAP)
                                                  │
                                                  ▼
-                                         Nota Control / iss.fazenda.df.gov.br
+                                         Sefin Nacional (REST, ADR-0008) — competência ≥ 11/2026
+                                         ISSnet ABRASF 2.04 (SOAP) — só competência retroativa
                                                  │
                                                  ▼
                                          src/email_nfse.py
@@ -158,7 +160,7 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 | `src/spreadsheet.py` | Legado — só scripts utilitários; xlsx desatualizado | Evitar; não usar como fonte de dados |
 | `src/scheduled_invoices.py` | Estável | Só com bug reproduzível |
 | `mcp_iugu/server.py` | Estável | Só com bug reproduzível |
-| `src/nfse_df.py` | Estável em produção (ABRASF 2.04 auto-emissão) | Sim, se aparecer novo erro de schema |
+| `src/nfse_df.py` | Estável em produção (API Sefin Nacional desde 12/11/2026; ABRASF p/ competência < 11/2026) | Sim, se aparecer novo erro de schema |
 | `src/nfse_guard.py` | **Estável em produção** (lock + guardrail anti-duplicata, ADR-0006) | Só com bug reproduzível; mexer aqui é risco de NFS-e duplicada |
 | `src/email_nfse.py` | Estável em produção (auto-envio + reenviar) | Sim, sob pedido |
 | `src/config.py` | Adicione campos com Field + default explícito | Sim |
@@ -179,6 +181,7 @@ Se for adicionar `pytest`, alinhe com o Bruno antes — ele tem preferência por
 - 🏢 **Multi-empresa (ADR-0007):** produção roda **duas instâncias** no mesmo domínio — MegaSuporte (`:8000`, rotas `/api /auth /webhook /health`) e MegaTeam (`:8001`, rotas `/megateam/*`), roteadas por caminho no vhost `iugu-megasuporte-le-ssl.conf`. ⚠️ Ao mexer no vhost, **confira o destino de TODAS as linhas `ProxyPass`** (`grep -n ProxyPass`) — uma edição manual já mandou as rotas da MegaSuporte pro 8001 e as duas empresas mostraram os mesmos dados por 1 dia. **Diagnostique roteamento pelo domínio PÚBLICO autenticado, nunca só por localhost/`/health`** (o `/health` é idêntico nas duas). Postmortem: `docs/incidente_multiempresa_apache_2026-07.md`. `git pull`+restart tem que ser **nas duas** instâncias.
 - ⚠️ **TLS do servidor da ISSnet (não confundir com o A1):** a ISSnet (`df.issnetonline.com.br`) usa cert **GoDaddy** que renova periodicamente; quando a cadeia nova não é ancorada pelo `certifi`/bundle do SO, TODA emissão falha com `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`. Conserto: `verify` é configurável via `NFSE_CA_BUNDLE_PATH` (`.env`) → aponta pra um bundle `certifi + cadeia GoDaddy` (`certs/issnet_ca_bundle.pem`). **Nunca usar `verify=False`.** Postmortem + procedimento de refazer o bundle: **`docs/incidente_tls_issnet_2026-07.md`** (resumo no HANDOFF, seção 14/07/2026). Aconteceu em ~30/06/2026.
 - ⚠️ **Listagem de clientes da Iugu quebrada (bug deles, desde ~18/06/2026):** `GET /v1/customers` SEM filtro retorna só 1, mas `GET /v1/customers/{id}` e `?query=<termo>` funcionam. Contorno no código: `carregar()` enumera por **busca (vogais)** + registro local (`nfse_emitidas/registro_customer_ids.json`) + busca por ID on-demand; `scripts/seed_customer_ids.py` semeia a lista completa (busca a-z). Se a lista de empresas vier incompleta, rode o seed + restart. Detalhes em `docs/iugu_listagem_customers_contorno.md`.
+- ⚠️ **Sefin Nacional: homologação NÃO prova o leiaute de produção.** A produção restrita roda um XSD mais novo que a produção (`finNFSe` em `infDPS`, `cNBS` antes de `xDescServ`). `_ajustar_dps_para_sefin` escolhe pelo ambiente; quando a produção adotar o XSD novo as notas voltam a ser recusadas com `E1235` → `NFSE_SEFIN_LEIAUTE_NOVO=true` no `.env` + restart (sem deploy). `E1235` é recusa sem nota. Ver seção 8.3 de `docs/incidente_l120_simples_nacional_2026-11.md`. Testar sem tocar produção: `scripts/teste_api_nacional_homolog.py` numa cópia do código na VPS.
 - 🗓️ **CNPJ alfanumérico (Receita/Iugu, a partir de jul/2026):** validação de CNPJ hoje exige 14 **dígitos** — precisará aceitar letras (tratar como string). Adaptação pendente antes de julho/2026.
 
 ---
@@ -213,7 +216,7 @@ Os 4 bugs que travaram a Fase 2 com `E160`. Já corrigidos em `src/nfse_df.py`; 
 | 3 | E160 | `<nDPS>` com zeros à esquerda — pattern XSD `[1-9][0-9]{0,14}` | `_proximo_numero_dps()` retorna `str(int)` sem padding |
 | 4 | E160 | `<verAplic>` com 27 chars — maxLength=20 | `"iugu-nfse-df-0.3"` (16 chars) |
 
-Outras correções relacionadas: grupo `<IBSCBS>` injetado via lxml (era ausente), `versao` 1.00→1.01, Id da DPS com 45 chars no formato correto, `cTribNac` normalizado de `"01.07"` → `"010700"`, `cTribMun` e `cNBS` adicionados, ordem dos filhos de `<tribMun>` corrigida, `tpImunidade` removido quando `tribISSQN != 2`. Detalhe completo no HANDOFF.
+Outras correções relacionadas: grupo `<IBSCBS>` injetado via lxml (era ausente), `versao` 1.00→1.01, Id da DPS com 45 chars no formato correto, `cTribNac` normalizado de `"01.07"` → `"010701"` (sem desdobro assume `01`; a Sefin recusa `010700` com `E0310`), `cTribMun` e `cNBS` adicionados, ordem dos filhos de `<tribMun>` corrigida, `tpImunidade` removido quando `tribISSQN != 2`. Detalhe completo no HANDOFF.
 
 ---
 

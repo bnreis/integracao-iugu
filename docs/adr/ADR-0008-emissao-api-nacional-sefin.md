@@ -1,6 +1,6 @@
 # ADR-0008 — Emissão de NFS-e pela API da Sefin Nacional (REST)
 
-- **Status:** 🟡 **Em produção na MegaTeam desde 2026-11-12** (`NFSE_PADRAO=nacional`); primeira nota real pendente de conferência.
+- **Status:** ✅ **Em produção na MegaTeam desde 2026-11-12** (`NFSE_PADRAO=nacional`). Primeira nota real: NFS-e nº 1, 12/11/2026 (seção 8.4 do incidente).
 - **Contexto:** desde 01/11/2026 a ISSnet (ABRASF 2.04) recusa RPS de optante do Simples Nacional
   com competência ≥ 11/2026 (`L120`). Toda emissão da MegaTeam falhava desde 05/11/2026.
   Diagnóstico e provas: `docs/incidente_l120_simples_nacional_2026-11.md`.

@@ -1,7 +1,7 @@
 # Incidente — L120: ISSnet bloqueia RPS (ABRASF) com competência ≥ 01/11/2026 para Simples Nacional (2026-11-05 →)
 
-- **Status:** 🟠 **Diagnosticado, NÃO resolvido em produção** (atualizado em 2026-11-12). Caminho definitivo
-  (opção C, API Nacional) **provado em homologação** — ver seção 8. Falta implementar no código e decidir as 5 faturas paradas.
+- **Status:** ✅ **Resolvido em 2026-11-12** — a MegaTeam emite pela API da Sefin Nacional (`NFSE_PADRAO=nacional`,
+  ADR-0008). Primeira nota real: NFS-e nº 1 (seção 8.4). Pendente: decidir as faturas paradas (seção 6).
 - **Severidade:** Alta — **todas** as emissões da MegaTeam (ABRASF 2.04, optante Simples Nacional) falham desde 05/11.
 - **Componente:** `src/nfse_df.py` (`_emitir_abrasf204`, competência = hoje).
 - **Causa:** externa (mudança de regra da ISSnet/DF), previsível pelo cronograma do Padrão Nacional.
@@ -74,10 +74,10 @@ O construtor/assinador de DPS existente é reaproveitável; o **transporte e o p
 
 ## 6. Pendências
 
-- Decidir A/B/C com o Bruno + contador; abrir ADR para C.
+- ~~Decidir A/B/C; abrir ADR para C~~ — feito: opção C, ADR-0008, em produção desde 12/11.
 - Resolver as 5 faturas paradas (acima) e depois `Marcar como emitida` se feitas no portal nacional.
 - Conferir se há **MegaSuporte** afetada (instância desativada) e demais empresas Simples Nacional.
-- Atualizar `CLAUDE.md`/ADR-0005: remover a afirmação de que a virada é "trocar 1 variável".
+- ~~Atualizar `CLAUDE.md`/ADR-0005~~ — feito em 12/11.
 - Se o E232 reaparecer em volume, seguir o postmortem de outubro.
 
 ## 8. Teste isolado da API Nacional em homologação (12/11) — ✅ funcionou
@@ -196,7 +196,19 @@ agora reclamando da **falta** de `finNFSe` ou da ordem de `cNBS`. Conserto: `NFS
 **Lição:** a homologação não prova o leiaute de produção — só a regra de negócio. Erro de esquema (`E1235`) é
 recusa sem nota: nada é emitido, e o número de DPS continua reservado para a mesma fatura.
 
-**Não provado:** a hipótese só fica confirmada quando a primeira nota real for aceita.
+**Confirmado:** com a correção no ar, a emissão seguinte foi aceita (seção 8.4).
+
+### 8.4 Primeira nota real pela API Nacional (12/11, 15:44 BRT) — ✅
+
+Emitida pelo Bruno no painel, fatura `03483C480E1B44C8ABD617F476D8BE89` (Star Corretora de Seguros, R$ 530,00):
+`POST /nfse` → `201`, **NFS-e nº 1**, `cStat 100`, `tpAmb 1`, DPS nº 2 série 00001, chave `53001082227987745000142000000000000126117434681426`.
+Índice `nfse_<fatura>.json` gravado, XML oficial arquivado (`dps_2_retorno_*.xml`), e-mail ao tomador enviado.
+
+- O link de consulta pública do e-mail (`https://www.nfse.gov.br/ConsultaPublica/?tpc=1&chave=<chave>`) abre com
+  a chave preenchida e pede captcha — conferido.
+- A nota de ME/EPP do Simples sem retenção vem **sem** `vBC`/`vISSQN` (ISS apurado no DAS); só `vLiq`.
+- A DPS nº 1 continua reservada para a fatura `AFFDDCC8…` (Grau Técnico, R$ 1.500,00), recusada duas vezes com
+  `E1235` antes da correção e ainda não reemitida. A reserva não expira; a próxima tentativa usa o nº 1.
 
 ## 7. Como diagnosticar de novo
 

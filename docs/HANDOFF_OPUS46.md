@@ -6,6 +6,36 @@
 
 ---
 
+## 🆕 12/11/2026 — Emissão pela API da Sefin Nacional NO AR na MegaTeam (ADR-0008) — resolve o L120
+
+**Por quê:** desde 01/11/2026 a ISSnet (ABRASF 2.04) recusa RPS de optante do Simples Nacional com
+competência ≥ 11/2026 (`L120`); toda emissão da MegaTeam falhava desde 05/11.
+
+**O que mudou:** `NFSE_PADRAO=nacional` na MegaTeam → `_emitir_nacional` (`src/nfse_df.py`) envia a DPS por
+REST com mTLS à Sefin Nacional (`POST /nfse`), com número de DPS reservado por fatura (`.contador_dps.json`),
+consulta antes de enviar (`GET /dps/<id>`) e recuperação após timeout. Competência < 11/2026 segue no ABRASF.
+E-mail da nota nacional = XML + link de consulta pública (sem PDF local).
+
+**Primeira nota real:** NFS-e **nº 1**, 12/11 15:44 BRT, Star Corretora de Seguros, R$ 530,00, DPS nº 2,
+chave `53001082227987745000142000000000000126117434681426`.
+
+**Armadilha descoberta:** produção e homologação usam XSDs diferentes (`E1235` na primeira tentativa real) —
+`NFSE_SEFIN_LEIAUTE_NOVO` no `.env`. Seção 8.3 do incidente.
+
+**Pendências (decisão do Bruno / contador):**
+- Fatura do Grau Técnico (`AFFDDCC8…`, R$ 1.500,00): recusada 2× antes da correção; DPS nº 1 reservada — reemitir pelo painel.
+- Faturas paradas de 05–11/11 (RPS 196–200): ABRIG R$ 580, SINDICONDOMINIO-DF R$ 3.150, KEMMI PHARMA R$ 2.200
+  (esta falhou com `E232`, não `L120` — conferir na ISSnet se a nota não saiu antes de emitir de novo).
+- ISS retido: em homologação a nota veio com `vLiq` igual ao bruto (não descontou a retenção) — conferir com o
+  contador antes da primeira nota real com retenção.
+- Não implementado: cancelamento pela API, DANFSE (PDF) no e-mail, `IBSCBS` (obrigatório p/ Simples só em 2027).
+- MegaSuporte (instância desativada) não foi tocada; se voltar, precisa do mesmo `.env`.
+- `/tmp/homolog_nacional` na VPS (cópia de teste) pode ser apagada.
+
+Docs: `docs/adr/ADR-0008-emissao-api-nacional-sefin.md`, `docs/incidente_l120_simples_nacional_2026-11.md`.
+
+---
+
 ## 🆕 16/10/2026 — E232 intermitente da ISSnet + RPS por fatura + fuso Brasília (DEPLOYADO só na MegaTeam, commit `87c0588`)
 
 > **Deploy 16/10 ~21h (BRT):** push + `git pull --ff-only` + restart de `iugu-webhook-megateam` (PID novo, sem erros). Validado pelo domínio público: `/megateam/health` 200, `/health` 200 (8000), webhook com token inválido → 401 na instância 8001; ProxyPass conferido. Testes offline rodaram na VPS (24/24) e o contador real seguiu em 189. **MegaSuporte (`/opt/integracao-iugu`, desativada) ficou em `0d8ad72`** — não atualizada de propósito. `pip install` não foi necessário (zoneinfo usa o tzdata do sistema).

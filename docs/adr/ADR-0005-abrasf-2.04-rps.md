@@ -2,6 +2,11 @@
 
 ## Status
 
+> **Atualização 2026-11-12:** o ABRASF 2.04 deixou de servir para competência ≥ 11/2026 (a ISSnet
+> recusa optante do Simples Nacional com `L120`). A emissão passou para a API da Sefin Nacional —
+> **ADR-0008**. A virada **não** foi "trocar 1 variável": o SOAP nacional da ISSnet nunca respondeu e o
+> transporte foi reescrito. O ABRASF segue em uso só para competência retroativa (< 11/2026).
+
 **Proposto** — *condicionado à resposta do Nota Control* (esclarecimento Padrão Nacional vs ABRASF).
 
 - **Data:** 2026-06-05
