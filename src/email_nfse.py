@@ -51,6 +51,9 @@ _ENDERECO_LINHA_1 = settings.prestador_endereco_linha1
 _ENDERECO_LINHA_2 = settings.prestador_endereco_linha2
 # Página oficial de verificação de autenticidade da NFS-e do DF.
 _PORTAL_DANFSE = "https://iss.fazenda.df.gov.br/online/NotaDigital/VerificaAutenticidade.aspx"
+# Consulta pública da NFS-e NACIONAL (Sefin): link direto pela chave de acesso; é onde
+# o tomador confere a nota e baixa o PDF oficial (DANFSE).
+_CONSULTA_NACIONAL = "https://www.nfse.gov.br/ConsultaPublica/?tpc=1&chave="
 # Inscrição Municipal (CF/DF) do prestador — pedida na página de verificação.
 _INSCRICAO_MUNICIPAL = settings.prestador_inscricao_municipal
 
@@ -243,18 +246,39 @@ def _montar_html(
     codigo_verif: str,
     data_emissao: Optional[str],
     valor_fmt: Optional[str],
+    chave_acesso: Optional[str] = None,
 ) -> str:
-    """Monta o corpo HTML do e-mail (responsivo simples, CSS inline)."""
+    """Monta o corpo HTML do e-mail (responsivo simples, CSS inline).
+
+    Com `chave_acesso` (nota NACIONAL/Sefin) troca o código de verificação pela chave,
+    aponta a conferência para a consulta pública nacional e não promete PDF anexo.
+    """
     # Linhas opcionais da tabela: só renderiza se houver o dado.
+    rotulo_codigo = "Chave de acesso" if chave_acesso else "Código de verificação"
+    valor_codigo = chave_acesso or codigo_verif
     linha_codigo = (
         f"""
       <tr>
-        <td style="padding: 8px 14px; font-weight: bold; border: 1px solid #e0e0e0; background: #f7f7f7;">Código de verificação</td>
-        <td style="padding: 8px 14px; border: 1px solid #e0e0e0;">{codigo_verif}</td>
+        <td style="padding: 8px 14px; font-weight: bold; border: 1px solid #e0e0e0; background: #f7f7f7;">{rotulo_codigo}</td>
+        <td style="padding: 8px 14px; border: 1px solid #e0e0e0; word-break: break-all;">{valor_codigo}</td>
       </tr>"""
-        if codigo_verif
+        if valor_codigo
         else ""
     )
+    if chave_acesso:
+        link = _CONSULTA_NACIONAL + chave_acesso
+        texto_anexos = "o arquivo XML da NFS-e."
+        bloco_verificar = (
+            f'acesse <a href="{link}" style="color: #1a5fb4;">a consulta pública da NFS-e</a> '
+            f"para conferir a nota e baixar o PDF oficial (DANFSE) no portal nacional."
+        )
+    else:
+        texto_anexos = "PDF da NFS-e (DANFSE) e o arquivo XML."
+        bloco_verificar = (
+            f'acesse\n      <a href="{_PORTAL_DANFSE}" style="color: #1a5fb4;">{_PORTAL_DANFSE}</a>\n'
+            f"      e informe os dados acima (Inscrição Municipal, Número da NFS-e e Código de\n"
+            f"      verificação) para conferir a nota no portal oficial."
+        )
     linha_data = (
         f"""
       <tr>
@@ -303,14 +327,11 @@ def _montar_html(
     </table>
 
     <p style="margin: 0 0 12px;">
-      &#128206; <strong>Anexos:</strong> PDF da NFS-e (DANFSE) e o arquivo XML.
+      &#128206; <strong>Anexos:</strong> {texto_anexos}
     </p>
 
     <p style="margin: 0 0 16px;">
-      &#128279; <strong>Verificar autenticidade:</strong> acesse
-      <a href="{_PORTAL_DANFSE}" style="color: #1a5fb4;">{_PORTAL_DANFSE}</a>
-      e informe os dados acima (Inscrição Municipal, Número da NFS-e e Código de
-      verificação) para conferir a nota no portal oficial.
+      &#128279; <strong>Verificar autenticidade:</strong> {bloco_verificar}
     </p>
 
     <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 20px 0;" />
@@ -353,6 +374,7 @@ def montar_email_nfse(
     """
     numero_nfse = str(dados.get("numero_nfse") or "?")
     codigo_verif = str(dados.get("codigo_verificacao") or "")
+    chave_acesso = str(dados.get("chave_acesso") or "")  # só nota nacional (Sefin)
     data_emissao = dados.get("data_emissao")
     valor_fmt = _formatar_valor_brl(dados.get("valor"))
     razao_tomador = empresa.razao_social or "Cliente"
@@ -379,6 +401,7 @@ def montar_email_nfse(
         codigo_verif=codigo_verif,
         data_emissao=str(data_emissao) if data_emissao else None,
         valor_fmt=valor_fmt,
+        chave_acesso=chave_acesso,
     )
 
     # Corpo = multipart/related (HTML + logo inline referenciada por CID).
@@ -397,7 +420,9 @@ def montar_email_nfse(
 
     # Anexos (nível "mixed"): PDF da DANFSE + XML da NFS-e oficial. Nenhum é
     # obrigatório — se faltar, envia assim mesmo (warning), sem interromper.
-    if not _anexar_pdf_danfse(msg, dados, numero_nfse):
+    # Nota nacional: sem PDF próprio — o gerador local só entende o XML ABRASF (sairia
+    # em branco); o PDF oficial fica no link de consulta pública do corpo do e-mail.
+    if not chave_acesso and not _anexar_pdf_danfse(msg, dados, numero_nfse):
         logger.info(
             f"E-mail da NFS-e Nº {numero_nfse} sem PDF DANFSE (segue com XML) "
             f"— empresa {razao_tomador}"

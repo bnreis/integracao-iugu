@@ -373,12 +373,41 @@ def teste_despacho() -> None:
     _check("padrao=abrasf204 segue no ABRASF", backend("abrasf204", None) == "abrasf204")
 
 
+def teste_email() -> None:
+    print("6) E-mail da nota nacional:")
+    from src import email_nfse
+
+    def anexos(msg) -> list[tuple[str, bytes]]:
+        return [(p.get_content_type(), p.get_payload(decode=True)) for p in msg.walk()
+                if "attachment" in (p.get("Content-Disposition") or "")]
+
+    empresa = nfse_df.Empresa(cnpj="36342291000143", razao_social="MEGASUPORTE", email="fin@exemplo.com.br")
+    with tempfile.TemporaryDirectory() as t:
+        xml = Path(t) / "dps_1_retorno.xml"
+        xml.write_text(NFSE_XML, encoding="utf-8")
+        dados = {"numero_nfse": "1", "codigo_verificacao": CHAVE, "valor": 1.0,
+                 "data_emissao": "2026-11-12", "xml_retorno_path": str(xml)}
+        msg, html, _ = email_nfse.montar_email_nfse(empresa, {**dados, "chave_acesso": CHAVE})
+        _check("link de consulta pública com a chave", email_nfse._CONSULTA_NACIONAL + CHAVE in html)
+        _check("não manda pro portal da ISSnet", "VerificaAutenticidade" not in html)
+        _check("rótulo 'Chave de acesso' no lugar de 'Código de verificação'",
+               "Chave de acesso" in html and "Código de verificação" not in html)
+        _check("não promete PDF anexo", "PDF da NFS-e" not in html)
+        _check("só o XML oficial anexo, byte a byte", anexos(msg) == [("application/xml", NFSE_XML.encode("utf-8"))])
+
+        _, html_abrasf, _ = email_nfse.montar_email_nfse(empresa, {**dados, "codigo_verificacao": "ABC123"})
+        _check("nota ABRASF (sem chave) segue com o texto de hoje",
+               "VerificaAutenticidade" in html_abrasf and "Código de verificação" in html_abrasf
+               and "PDF da NFS-e" in html_abrasf and email_nfse._CONSULTA_NACIONAL not in html_abrasf)
+
+
 if __name__ == "__main__":
     teste_ajuste_leiaute()
     teste_transporte()
     teste_nao_json()
     teste_emissao()
     teste_despacho()
+    teste_email()
     print()
     if _falhas:
         print(f"{_falhas} verificação(ões) FALHARAM.")
