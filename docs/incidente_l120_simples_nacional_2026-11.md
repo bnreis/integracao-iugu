@@ -162,6 +162,42 @@ Só `GET`, da VPS, com o A1 da MegaTeam — nada foi emitido:
 
 Falta só a emissão real: uma fatura escolhida pelo Bruno, com `NFSE_PADRAO=nacional` na MegaTeam.
 
+### 8.3 Primeira emissão real recusada: produção e homologação usam XSDs diferentes (12/11)
+
+**Sintoma:** com `NFSE_PADRAO=nacional` na MegaTeam, a primeira nota real (DPS nº 1, duas tentativas pelo
+painel, ~15:28 BRT) voltou `400` da Sefin de produção. No painel aparece só "A prefeitura rejeitou a nota".
+Evidência: `nfse_emitidas/dps_1_retorno_*.json`.
+
+```
+E1235 — Falha no esquema XML do DF-e. (The element 'infDPS' ... has invalid child element 'finNFSe' ...
+List of possible elements expected: 'cMotivoEmisTI, chNFSeRej, cLocEmi')
+```
+
+**Causa:** a **produção restrita** (homologação) roda um XSD mais novo que a **produção**:
+
+| Ambiente | Pacote de esquemas (gov.br) | `finNFSe` | Ordem em `cServ` |
+|---|---|---|---|
+| Produção | `NFSe-ESQUEMAS_XSD-v1.01-20260209` | só dentro de `IBSCBS` (não enviamos o grupo) | `cTribNac, cTribMun, xDescServ, cNBS` |
+| Produção restrita | `NFSe-ESQUEMAS_XSD-PRODREST-v1.01-20261020` | filho de `infDPS`, logo após `tpEmit` | `cTribNac, cTribMun, cNBS, xDescServ` |
+
+Ou seja: dos ajustes da tabela da seção 8, os de **posição** (`finNFSe` em `infDPS`, `cNBS` antes de
+`xDescServ`) valem só para a homologação. Os demais valem nos dois — conferido no leiaute oficial de produção
+(Anexo I, `v1.01-20260209`): `IBSCBS` é `0-1` ("para optantes do Simples Nacional, só obrigatório a partir de
+2027"), `cTribMun` tem 3 dígitos, e as regras `E0120` (IM), `E0121` (xNome), `E0310`, `E0625` (pAliq) existem lá.
+
+**Correção:** `_ajustar_dps_para_sefin` só aplica os dois ajustes de posição no "leiaute novo". A escolha é
+automática pelo ambiente (`homologacao` → novo; `producao` → atual) e pode ser forçada por
+`NFSE_SEFIN_LEIAUTE_NOVO=true|false` no `.env`.
+
+**Quando a produção adotar o XSD novo** (sem data conhecida): as notas voltarão a ser recusadas com `E1235`,
+agora reclamando da **falta** de `finNFSe` ou da ordem de `cNBS`. Conserto: `NFSE_SEFIN_LEIAUTE_NOVO=true` no
+`.env` da instância + restart. Não precisa de deploy.
+
+**Lição:** a homologação não prova o leiaute de produção — só a regra de negócio. Erro de esquema (`E1235`) é
+recusa sem nota: nada é emitido, e o número de DPS continua reservado para a mesma fatura.
+
+**Não provado:** a hipótese só fica confirmada quando a primeira nota real for aceita.
+
 ## 7. Como diagnosticar de novo
 
 ```bash

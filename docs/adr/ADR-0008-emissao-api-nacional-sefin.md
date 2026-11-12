@@ -32,6 +32,12 @@ ao leiaute da Sefin, assina com o A1 e envia por **REST com mTLS**:
 (`01.07` → `010701`). A tabela completa, com o erro que revelou cada ajuste, está na seção 8 do
 incidente. O grupo `IBSCBS` não é enviado (aceito para Simples Nacional).
 
+**Produção e homologação usam XSDs diferentes** (descoberto na primeira emissão real, `E1235`): a
+produção restrita exige `finNFSe` em `infDPS` e `cNBS` antes de `xDescServ`; a produção
+(`v1.01-20260209`) recusa os dois. O ajuste escolhe pelo ambiente e pode ser forçado por
+`NFSE_SEFIN_LEIAUTE_NOVO` no `.env` — é o que se vira quando a produção adotar o XSD novo. Seção 8.3
+do incidente.
+
 ### Numeração e não duplicar nota
 
 - Número de DPS **reservado por fatura** em `.contador_dps.json` (mesmo mecanismo do RPS). A
@@ -65,6 +71,8 @@ baixa o PDF; não há PDF gerado localmente.
   recupera a nota). **Não** emitir pelo portal nacional.
 - **Tomador fora do DF** em cidade sem código IBGE em `_codigo_ibge_por_cidade`: a emissão é
   recusada antes de enviar; incluir a cidade na tabela.
+- **`E1235` (falha de esquema) em produção:** nada foi emitido. Ver a seção 8.3 do incidente; se a
+  mensagem citar `finNFSe` ou `cNBS`, virar `NFSE_SEFIN_LEIAUTE_NOVO` + restart.
 - **Volta atrás:** `NFSE_PADRAO=abrasf204` + restart (o ABRASF segue recusando competência ≥ 11/2026).
 - **Testar sem tocar produção:** `scripts/teste_api_nacional_homolog.py` numa cópia do código na VPS
   (seção 8.1 do incidente).
