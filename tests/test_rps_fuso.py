@@ -192,7 +192,7 @@ def teste_fuso() -> None:
     with tempfile.TemporaryDirectory() as t:
         with patch.object(nfse_df.settings, "nfse_output_dir", t), \
                 patch.object(nfse_df, "hoje_br", return_value=dia_br):
-            res = MagicMock(numero_nfse="1", codigo_verificacao="X", xml_enviado_path=None,
+            res = MagicMock(numero_nfse="1", codigo_verificacao="X", chave_acesso=None, xml_enviado_path=None,
                             xml_retorno_path=None, pdf_path=None, ambiente="producao")
             caminho = nfse_df._gravar_log_nfse(
                 {"id": "INV_FUSO", "total_cents": 10000}, _empresa(), res, rps_numero="7")
