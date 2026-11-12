@@ -1,112 +1,120 @@
-# Teste isolado da API Nacional (producao restrita = homologacao). NAO usa contadores, NAO
-# arquiva em nfse_emitidas, NAO toca producao. Resultado em docs/incidente_l120_simples_nacional_2026-11.md.
-# Rodar na VPS (o A1 e o .env ficam la), a partir da raiz do repo local:
-#   ssh studio-vps 'cd /opt/integracao-iugu-megateam && sudo -u iugu env SEM_IBSCBS=1 NDPS=900002 .venv/bin/python -' < scripts/teste_api_nacional_homolog.py
-# NDPS precisa ser inedito (900001 ja virou a NFS-e de teste n. 1 em 12/11/2026).
-import os, gzip, base64, json, tempfile, httpx
+# Prova em HOMOLOGACAO (producao restrita) da emissao pela API Nacional com o CODIGO REAL
+# (nfse_df.emitir_nfse). NAO toca producao: forca homologacao e um diretorio de saida proprio
+# so neste processo. Resultados em docs/incidente_l120_simples_nacional_2026-11.md.
+#
+# Rodar na VPS, numa COPIA do codigo (o servico em producao nao e tocado), a partir do repo local:
+#   ssh studio-vps 'cd /tmp/homolog_nacional/src && sudo -u iugu env SAIDA=/tmp/homolog_nacional/saida \
+#       CASO=A /opt/integracao-iugu-megateam/.venv/bin/python -' < scripts/teste_api_nacional_homolog.py
+#
+# SAIDA: UM diretorio so, mantido entre os casos (contador de DPS, reservas e indices ficam la).
+# CASO (um ou varios, separados por virgula):
+#   A normal R$1,00, codigo de servico como esta no cadastro real ("01.07"), tomador com e-mail
+#   B ISS retido (valor bruto R$2,00 em custom_variables)
+#   C tomador de Sao Paulo/SP, R$3,00
+#   D recuperacao: estado de "timeout depois do aceite" do caso A -> mesma chave, sem POST
+#   E reenvio direto da DPS ja aceita do caso A -> o que a Sefin responde a DPS repetida
+#   F contador de DPS atrasado: 1a tentativa recusa sem enviar, 2a usa o numero seguinte (R$4,00)
+import asyncio
+import json
+import os
+import sys
+import time
 from pathlib import Path
-from lxml import etree
-from src.config import settings
-from src.spreadsheet import Empresa
-from src import nfse_df as n
 
-NS = "http://www.sped.fazenda.gov.br/nfse"
-Q = lambda t: f"{{{NS}}}{t}"
+SAIDA = Path(os.environ["SAIDA"])
+SAIDA.mkdir(parents=True, exist_ok=True)
+os.environ.update(NFSE_PADRAO="nacional", NFSE_AMBIENTE="homologacao",
+                  NFSE_OUTPUT_DIR=str(SAIDA), NFSE_DRY_RUN="false")
 
+from loguru import logger  # noqa: E402
 
-def _set(k, v):
-    try:
-        setattr(settings, k, v)
-    except Exception:
-        object.__setattr__(settings, k, v)
+logger.remove()
+logger.add(sys.stderr, level="WARNING")
 
+from src import nfse_df as n  # noqa: E402
+from src.config import settings  # noqa: E402
 
-def ajustar(xml: str) -> str:
-    """Adapta a DPS (leiaute Nota Control v1.01) ao leiaute que a Sefin Nacional pede."""
-    root = etree.fromstring(xml.encode("utf-8"))
-    inf = root.find(Q("infDPS"))
-    ibs = inf.find(Q("IBSCBS"))
-    tp_emit = inf.find(Q("tpEmit"))
-    # AJUSTES (editados a cada rodada conforme o erro de schema devolvido)
-    fin = ibs.find(Q("finNFSe"))
-    ibs.remove(fin)
-    fin.tail = None
-    tp_emit.addnext(fin)
-    # cTribMun nacional = 3 digitos; DF administra 01.07.01.001 (aliq 2%, desde 27/10/2026)
-    # segundo adn.../parametrizacao/5300108/01.07.01.001/<data>/aliquota. "1071" e do leiaute ISSnet.
-    for el in root.iter(Q("cTribMun")):
-        el.text = os.environ.get("CTRIBMUN", "001")
-    # cNBS: depois de xDescServ nada e aceito -> tentar antes
-    nbs = next(root.iter(Q("cNBS")))
-    desc = next(root.iter(Q("xDescServ")))
-    nbs.getparent().remove(nbs)
-    desc.addprevious(nbs)
-    # IBSCBS/valores/trib: CST e cClassTrib direto em <trib>, sem o wrapper gIBSCBS
-    g = next(root.iter(Q("gIBSCBS")))
-    for filho in list(g):
-        g.addprevious(filho)
-    g.getparent().remove(g)
-    # cIndOp "000000" (placeholder nosso) nao existe na calculadora IBS/CBS.
-    # Simples Nacional: testar sem o grupo IBSCBS (SEM_IBSCBS=1)
-    if os.environ.get("SEM_IBSCBS"):
-        inf.remove(ibs)
-    # E0120: DF nao tem dados complementares no CNC -> IM do prestador nao pode ir
-    prest = inf.find(Q("prest"))
-    prest.remove(prest.find(Q("IM")))
-    # E0121: emitente = prestador -> xNome do prestador nao pode ir
-    prest.remove(prest.find(Q("xNome")))
-    # E0625: Simples Nacional (opSimpNac=3) sem retencao -> pAliq nao pode ir
-    for el in root.iter(Q("pAliq")):
-        el.getparent().remove(el)
-    return etree.tostring(root, encoding="unicode")
+# Travas: se qualquer uma falhar, nada e enviado.
+assert settings.nfse_ambiente == "homologacao" and settings.nfse_padrao == "nacional"
+assert "producaorestrita" in n._sefin_base(), n._sefin_base()
+assert Path(n._COUNTER_FILE).parent == SAIDA and Path(settings.nfse_output_dir) == SAIDA
+
+CONTADOR = Path(n._COUNTER_FILE)
+ESTADO = SAIDA / "estado.json"
+if not CONTADOR.exists():  # numero alto, inedito na serie de homologacao (900001 ja foi usado)
+    CONTADOR.write_text(json.dumps({"ultimo_numero": int(os.environ.get("NDPS_INICIAL", "900100"))}))
+
+_orig = n._sefin_request
 
 
-out = Path(tempfile.mkdtemp(prefix="teste_api_nacional_"))
-_set("nfse_ambiente", "homologacao")  # tpAmb=2
-_set("nfse_output_dir", str(out))  # defesa: nada cai em nfse_emitidas
-assert settings.nfse_ambiente == "homologacao"
+def _espia(metodo, caminho, corpo=None):
+    status, resp = _orig(metodo, caminho, corpo)
+    print(f"   >> {metodo} {caminho[:70]} -> HTTP {status} | campos: {sorted(resp.keys())}")
+    return status, resp
 
-empresa = Empresa(cnpj="36342291000143", razao_social="MEGASUPORTE SERVICOS DE TI LTDA",
-                  email="", codigo_servico=settings.nfse_codigo_servico_padrao,
-                  descricao_servico="TESTE DE INTEGRACAO - SEM VALOR FISCAL",
-                  aliquota_iss=settings.nfse_aliquota_iss_padrao)
-invoice = {"id": "TESTE_API_NACIONAL", "total_cents": 100,
-           "payer_name": empresa.razao_social, "payer_cpf_cnpj": empresa.cnpj,
-           "payer_address_street": "SBN Quadra 1", "payer_address_number": "S/N",
-           "payer_address_district": "Asa Norte", "payer_address_city": "Brasília",
-           "payer_address_state": "DF", "payer_address_zip_code": "70040010"}
-servico = n.DadosServico(codigo_servico=empresa.codigo_servico, descricao=empresa.descricao_servico,
-                         valor_cents=100, aliquota_iss=empresa.aliquota_iss)
-xml, dps_id = n._montar_xml_dps(empresa=empresa, servico=servico,
-                                endereco_tomador=n.extrair_endereco_tomador(invoice),
-                                invoice=invoice, numero_dps=os.environ.get("NDPS", "900001"))
-xml = ajustar(xml)
-assinado = n._assinar_xml(xml, dps_id)
-if not assinado.lstrip().startswith("<?xml"):
-    assinado = '<?xml version="1.0" encoding="UTF-8"?>' + assinado
-(out / "dps_assinada.xml").write_text(assinado, encoding="utf-8")
-if os.environ.get("VER_XML"):
-    print(xml)
 
-payload = {"dpsXmlGZipB64": base64.b64encode(gzip.compress(assinado.encode("utf-8"))).decode()}
-cert, key = n._pkcs12_to_pem_tempfiles(Path(settings.nfse_certificado_path), settings.nfse_certificado_senha)
-try:
-    with httpx.Client(cert=(str(cert), str(key)), timeout=60) as c:
-        r = c.post("https://sefin.producaorestrita.nfse.gov.br/SefinNacional/nfse", json=payload)
-finally:
-    os.remove(cert)
-    os.remove(key)
-(out / "resposta.txt").write_text(f"{r.status_code}\n{r.text}", encoding="utf-8")
-print("HTTP", r.status_code)
-try:
-    j = r.json()
-    b64 = j.pop("nfseXmlGZipB64", None)
-    print(json.dumps(j, ensure_ascii=False, indent=1)[:4000])
-    if b64:
-        nfse = gzip.decompress(base64.b64decode(b64)).decode("utf-8")
-        (out / "nfse_retorno.xml").write_text(nfse, encoding="utf-8")
-        print("NFS-e de teste recebida, bytes:", len(nfse))
-        print(nfse[:2500])
-except Exception:
-    print(r.text[:3000])
-print("evidencias em", out)
+n._sefin_request = _espia
+
+
+def _estado() -> dict:
+    return json.loads(ESTADO.read_text()) if ESTADO.exists() else {}
+
+
+def emitir(caso: str, cents: int, *, cidade="Brasília", uf="DF", cep="70040010",
+           retido=False, extras=None) -> dict:
+    empresa = n.Empresa(
+        cnpj="36342291000143", razao_social="MEGASUPORTE SERVICOS DE TI LTDA",
+        email="homologacao@example.com", codigo_servico=os.environ.get("CODIGO_SERVICO", "01.07"),
+        descricao_servico="TESTE DE INTEGRACAO - SEM VALOR FISCAL", aliquota_iss=2.0,
+        iss_retido=retido, inscricao_municipal=os.environ.get("IM_TOMADOR", ""),
+    )
+    invoice = {"id": f"HOMOLOG_{caso}", "total_cents": cents,
+               "payer_name": empresa.razao_social, "payer_cpf_cnpj": empresa.cnpj,
+               "payer_address_street": "SBN Quadra 1", "payer_address_number": "S/N",
+               "payer_address_district": "Asa Norte", "payer_address_city": cidade,
+               "payer_address_state": uf, "payer_address_zip_code": cep, **(extras or {})}
+    r = asyncio.run(n.emitir_nfse(invoice, empresa))
+    print(f"[{caso}] sucesso={r['sucesso']} ambiente={r.get('ambiente')} numero={r.get('numero_nfse')} "
+          f"chave={r.get('chave_acesso')}")
+    if not r["sucesso"]:
+        print(f"[{caso}] ERRO: {r.get('mensagem_erro')}")
+    else:
+        log = json.loads((SAIDA / f"nfse_HOMOLOG_{caso}.json").read_text(encoding="utf-8"))
+        est = _estado()
+        est[caso] = {"numero_dps": str(log.get("rps_numero")), "chave": r["chave_acesso"]}
+        ESTADO.write_text(json.dumps(est, indent=1))
+    return r
+
+
+for caso in os.environ.get("CASO", "A").upper().split(","):
+    print(f"===== CASO {caso} =====")
+    if caso == "A":
+        emitir("A", 100)
+    elif caso == "B":
+        emitir("B", 196, retido=True, extras={"custom_variables": [{"name": "valor_bruto_nfse", "value": "200"}]})
+    elif caso == "C":
+        emitir("C", 300, cidade="São Paulo", uf="SP", cep="01310100")
+    elif caso == "D":
+        a = _estado()["A"]
+        (SAIDA / "nfse_HOMOLOG_A.json").unlink(missing_ok=True)
+        cont = json.loads(CONTADOR.read_text())
+        cont.setdefault("pendentes", {})["HOMOLOG_A"] = {"numero": int(a["numero_dps"]), "ts": time.time()}
+        CONTADOR.write_text(json.dumps(cont))
+        r = emitir("A", 100)
+        print("[D] mesma chave do caso A:", r.get("chave_acesso") == a["chave"])
+    elif caso == "E":
+        a = _estado()["A"]
+        assinada = sorted(SAIDA.glob(f"dps_{a['numero_dps']}_dps_assinada_*.xml"))[-1].read_text(encoding="utf-8")
+        status, resp = n._sefin_request("POST", "/nfse", {"dpsXmlGZipB64": n._empacotar_dps(assinada)})
+        resp.pop("nfseXmlGZipB64", None)
+        print(f"[E] HTTP {status}: {json.dumps(resp, ensure_ascii=False)[:900]}")
+    elif caso == "F":
+        cont = json.loads(CONTADOR.read_text())
+        cont["ultimo_numero"] -= 1
+        CONTADOR.write_text(json.dumps(cont))
+        r1 = emitir("F", 400)
+        print("[F] 1a tentativa recusou sem enviar:", not r1["sucesso"])
+        emitir("F", 400)
+    else:
+        print("caso desconhecido:", caso)
+print("evidencias em", SAIDA)

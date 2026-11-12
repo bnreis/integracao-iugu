@@ -114,16 +114,40 @@ descoberta pelo erro devolvido; estão todas em `ajustar()` no script:
 | 7 | `E0121` nome do prestador não deve ser informado | Remover `prest/xNome` quando o emitente é o próprio prestador |
 | 8 | `E0312` código de tributação não administrado pelo município | Resolvido pelo ajuste 2 (`010701` + `001`) |
 | 9 | `E0625` alíquota não permitida p/ ME/EPP sem retenção | Remover `pAliq` quando `tpRetISSQN=1` |
+| 10 | `E0310` código de tributação nacional não existe na lista nacional | O cadastro real traz `01.07`, que virava `010700`. Não existe desdobro `00`: `_normalizar_cTribNac` passa a assumir `01` (→ `010701`). Achado na prova com o código real (8.1) |
 
-**O que NÃO foi testado (antes de ligar em produção)**
+**O que ainda NÃO foi testado (antes de ligar em produção)**
 - Endpoint de **produção** (`sefin.nfse.gov.br`) e se a parametrização do DF lá é igual à da produção restrita.
-- ISS **retido** (`tpRetISSQN=2` + `pAliq` + valor bruto), tomador de outro município, e-mail do tomador.
-- Cancelamento (evento), consulta por chave, **DANFSE (PDF)**, política de série/numeração de DPS.
+- Cancelamento (evento) e **DANFSE (PDF)**; o link de consulta pública do e-mail (`nfse.gov.br/ConsultaPublica`).
 - Grupo `IBSCBS` preenchido de verdade (`cIndOp` válido) — hoje só passou **sem** o grupo.
+- Tomador fora do DF em cidade **fora** da tabela de `_codigo_ibge_por_cidade`: o código recusa antes de enviar
+  (hoje as 9 empresas que emitem nota estão no DF).
 
 **Trabalho para a opção C** (estimativa de escopo, não de prazo): novo transporte REST em `nfse_df.py`
 (no lugar do SOAP `wsnfsenacional`), os ajustes acima no `_patch_xml_para_v101`/`_montar_xml_dps`, parsing
 da resposta JSON (chave, nº, XML), link/PDF para o e-mail, integração com `nfse_guard`, e um teste de R$ 1,00 em produção.
+
+### 8.1 Prova com o código real (`nfse_df.emitir_nfse`) — 12/11, ✅ os 6 casos passaram
+
+Rodada numa **cópia separada** do código na VPS (`/tmp/homolog_nacional/src`, branch
+`feat/emissao-api-nacional`), com o venv e o `.env` de produção só para leitura e saída em
+`/tmp/homolog_nacional/saida`. O serviço não foi reiniciado nem atualizado; depois da rodada o
+`.contador_rps.json` tinha o mesmo hash, `NFSE_PADRAO` seguia `abrasf204` e não havia `dps_*` nem
+`.contador_dps.json` em `nfse_emitidas/`. Script: `scripts/teste_api_nacional_homolog.py` (env `CASO`).
+
+**Levantamento do cadastro real (somente leitura):** 16 empresas ativas, 9 emitem nota; as 9 com
+`codigo_servico = "01.07"`, alíquota 2%, todas no DF, todas com e-mail, **1 com ISS retido**.
+
+| Caso | O que prova | Resultado |
+|---|---|---|
+| A | Fatura normal R$ 1,00, código `01.07` do cadastro, tomador com e-mail | 1ª rodada: `E0310` (ajuste 10). Corrigido → NFS-e nº 2, DPS 900101 (a rejeição **não** queimou o número) |
+| B | ISS retido: `valor_bruto_nfse` R$ 2,00, `tpRetISSQN=2` + `pAliq` | NFS-e nº 3. A Sefin devolveu `vBC 2.00`, `vISSQN 0.04`, `vLiq 2.00` (não desconta o ISS retido do líquido) — conferir com o contador |
+| C | Tomador de São Paulo/SP (`cMun 3550308`) | NFS-e nº 4; local de incidência continua Brasília |
+| D | Recuperação: estado de "timeout depois do aceite" do caso A | `GET /dps/{id}` 200 → `GET /nfse/{chave}` 200 **com** `nfseXmlGZipB64` → mesma chave, **nenhum** POST |
+| E | Reenvio direto da DPS já aceita | `400` **`E0014`** ("Série, Número, Município Emissor e CNPJ ... já existe em uma NFS-e") — a Sefin barra DPS repetida |
+| F | Contador de DPS atrasado em 1 | 1ª tentativa recusa sem enviar ("contador de DPS desta máquina está atrasado"), 2ª usa o número seguinte → NFS-e nº 5 |
+
+Notas de homologação geradas (sem valor fiscal): nº 2 a 5, DPS 900101–900104, série 00001.
 
 ## 7. Como diagnosticar de novo
 
