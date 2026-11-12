@@ -429,6 +429,17 @@ def teste_emissao() -> None:
                and not (Path(t) / "nfse_INV_A.json").exists())
 
 
+def teste_codigo_servico() -> None:
+    # Homologação 12/11/2026: o cadastro real traz "01.07"; a Sefin recusou 010700 com E0310
+    # (código inexistente na lista nacional — não há desdobro "00") e aceita 010701.
+    print("7) Código de tributação nacional (cTribNac):")
+    f = nfse_df._normalizar_cTribNac
+    _check('"01.07" do cadastro vira 010701 (desdobro 01, não 00)', f("01.07") == "010701")
+    _check('"0107" e "010700" também viram 010701', f("0107") == "010701" and f("010700") == "010701")
+    _check("código já completo fica como está", f("010701") == "010701" and f("01.07.02") == "010702")
+    _check('outro item: "17.11" vira 171101', f("17.11") == "171101")
+
+
 def teste_despacho() -> None:
     print("5) emitir_nfse — despacho por padrão e competência:")
 
@@ -489,6 +500,7 @@ if __name__ == "__main__":
     teste_emissao()
     teste_despacho()
     teste_email()
+    teste_codigo_servico()
     print()
     if _falhas:
         print(f"{_falhas} verificação(ões) FALHARAM.")

@@ -1909,23 +1909,26 @@ def _normalizar_cTribNac(codigo_servico: str) -> str:
         - 2 dígitos para Subitem LC 116
         - 2 dígitos para Desdobro Nacional
 
+    A lista nacional não tem desdobro "00": a Sefin recusa 010700 com E0310 e aceita
+    010701 (homologação, 12/11/2026). Sem desdobro no cadastro, assume "01"; subitem com
+    mais de um desdobro precisa vir com os 6 dígitos no cadastro.
+
     Exemplos:
-        "01.07"  → "010700"
-        "1.03"   → "010300"
-        "17.11"  → "171100"
-        "010700" → "010700"  (já no formato correto)
+        "01.07"  → "010701"
+        "1.03"   → "010301"
+        "17.11"  → "171101"
+        "010702" → "010702"  (já completo)
     """
     digits = _so_digitos(codigo_servico)
     if len(digits) >= 6:
-        return digits[:6]
-    # Se veio como "0107" (4 dígitos, sem desdobro), adiciona "00" no final
-    if len(digits) == 4:
-        return digits + "00"
-    # Se veio como "103" (3 dígitos), assume item 01 + subitem 03 + desdobro 00
-    if len(digits) == 3:
-        return f"0{digits[0]}0{digits[1]}{digits[2]}0"
-    # Fallback: preenche com zeros à direita até 6
-    return digits.ljust(6, "0")[:6]
+        codigo = digits[:6]
+    elif len(digits) == 4:  # "0107": item + subitem, sem desdobro
+        codigo = digits + "00"
+    elif len(digits) == 3:  # "103": item 01 + subitem 03
+        codigo = f"0{digits[0]}{digits[1:]}00"
+    else:
+        codigo = digits.ljust(6, "0")[:6]
+    return codigo[:4] + "01" if codigo.endswith("00") else codigo
 
 
 # =============================================================================
@@ -2124,7 +2127,7 @@ def _montar_xml_dps(
     )
 
     # ---------- Serviço ----------
-    # cTribNac: 6 dígitos numéricos (ex: "010700" para item 01.07 LC116)
+    # cTribNac: 6 dígitos numéricos (ex: "010701" para item 01.07 LC116)
     c_trib_nac = _normalizar_cTribNac(servico.codigo_servico)
     # cTribMun: código de tributação municipal (obrigatório, xsd:int até 10 dígitos)
     c_trib_mun = settings.nfse_codigo_trib_municipal
