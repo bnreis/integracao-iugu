@@ -12,8 +12,10 @@ Os corpos de resposta e a DPS de exemplo são os REAIS do teste em homologação
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import gzip
+import json
 import os
 import sys
 import tempfile
@@ -29,6 +31,7 @@ except Exception:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("IUGU_API_TOKEN", "token-de-teste")  # Settings exige; nada é chamado
 
+import httpx  # noqa: E402
 from lxml import etree  # noqa: E402
 
 from src import nfse_df  # noqa: E402
@@ -112,10 +115,20 @@ def teste_ajuste_leiaute() -> None:
 
 
 CHAVE = "53001082227987745000142000000000000126112332975926"
-NFSE_XML = (
-    '<?xml version="1.0" encoding="utf-8"?><NFSe versao="1.01" xmlns="http://www.sped.fazenda.gov.br/nfse">'
-    f'<infNFSe Id="NFS{CHAVE}"><xLocEmi>Brasília</xLocEmi><nNFSe>1</nNFSe><cStat>100</cStat></infNFSe></NFSe>'
-)
+
+
+def _nfse_xml(cnpj_tomador: str = "36342291000143", valor: str = "1.00") -> str:
+    """NFS-e como a Sefin devolve: dados da nota + a DPS de origem embutida."""
+    return (
+        '<?xml version="1.0" encoding="utf-8"?><NFSe versao="1.01" xmlns="http://www.sped.fazenda.gov.br/nfse">'
+        f'<infNFSe Id="NFS{CHAVE}"><xLocEmi>Brasília</xLocEmi><nNFSe>1</nNFSe><cStat>100</cStat>'
+        f'<DPS versao="1.01"><infDPS Id="{DPS_ID}"><toma><CNPJ>{cnpj_tomador}</CNPJ></toma>'
+        f"<valores><vServPrest><vServ>{valor}</vServ></vServPrest></valores></infDPS></DPS>"
+        "</infNFSe></NFSe>"
+    )
+
+
+NFSE_XML = _nfse_xml()
 
 
 def _gzip_b64(texto: str) -> str:
@@ -215,10 +228,157 @@ def teste_nao_json() -> None:
                    nfse_df._sefin_base() == "https://sefin.nfse.gov.br/SefinNacional")
 
 
+class _Cenario:
+    """Monta o ambiente offline de _emitir_nacional num diretório temporário."""
+
+    def __init__(self, tmp: Path, respostas: list, dry_run: bool = False):
+        self.tmp, self.respostas = tmp, list(respostas)
+        self.chamadas: list[tuple[str, str]] = []
+        self.ids_montados: list[str] = []
+        self.corpos_post: list[dict] = []
+        self.to_thread: list = []
+        self.dry_run = dry_run
+
+    def _montar(self, *, empresa, servico, endereco_tomador, invoice, numero_dps):
+        dps_id = "DPS530010822798774500014200001" + numero_dps.zfill(15)
+        self.ids_montados.append(dps_id)
+        return DPS_NOTA_CONTROL.replace(DPS_ID, dps_id), dps_id
+
+    def _sefin(self, metodo, caminho, corpo=None):
+        self.chamadas.append((metodo, caminho))
+        if corpo is not None:
+            self.corpos_post.append(corpo)
+        r = self.respostas.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def emitir(self, invoice_id: str = "INV_A", competencia=None) -> dict:
+        real_to_thread = asyncio.to_thread
+
+        async def espia(fn, *a, **k):
+            self.to_thread.append(fn)
+            return await real_to_thread(fn, *a, **k)
+
+        empresa = nfse_df.Empresa(cnpj="36342291000143", razao_social="MEGASUPORTE SERVICOS DE TI LTDA",
+                                  email="", codigo_servico="010701", descricao_servico="TESTE", aliquota_iss=2.0)
+        invoice = {"id": invoice_id, "total_cents": 100, "payer_address_city": "Brasília",
+                   "payer_address_state": "DF", "payer_address_zip_code": "70040010"}
+        s, n, t = nfse_df.settings, nfse_df, self.tmp
+        with patch.object(s, "nfse_output_dir", str(t)), patch.object(s, "nfse_padrao", "nacional"), \
+                patch.object(s, "nfse_ambiente", "homologacao"), patch.object(s, "nfse_dry_run", self.dry_run), \
+                patch.object(n, "_COUNTER_FILE", t / ".contador_dps.json"), \
+                patch.object(n, "_COUNTER_RPS_FILE", t / ".contador_rps.json"), \
+                patch.object(n, "_COUNTER_LOCK_FILE", t / ".contador_dps.lock"), \
+                patch.object(n, "NFELIB_DISPONIVEL", True), patch.object(n, "ERPBRASIL_DISPONIVEL", True), \
+                patch.object(n, "_validar_configuracao", return_value=[]), \
+                patch.object(n, "_montar_xml_dps", side_effect=self._montar), \
+                patch.object(n, "_assinar_xml", side_effect=lambda xml, dps_id: xml), \
+                patch.object(n, "_sefin_request", side_effect=self._sefin), \
+                patch.object(n.asyncio, "to_thread", espia):
+            return asyncio.run(n.emitir_nfse(invoice, empresa, competencia=competencia))
+
+    def pendentes_dps(self) -> dict:
+        f = self.tmp / ".contador_dps.json"
+        return json.loads(f.read_text(encoding="utf-8")).get("pendentes", {}) if f.exists() else {}
+
+
+def teste_emissao() -> None:
+    print("4) _emitir_nacional — emissão pela Sefin:")
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(404, ERRO_E2404), (201, RESP_201)])
+        r = c.emitir()
+        dps_id = c.ids_montados[0]
+        _check("201 -> sucesso com número e chave",
+               r["sucesso"] and r["numero_nfse"] == "1" and r["chave_acesso"] == CHAVE)
+        _check("codigo_verificacao = chave de acesso", r["codigo_verificacao"] == CHAVE)
+        _check("ordem: GET /dps/<id> e depois POST /nfse", c.chamadas == [("GET", "/dps/" + dps_id), ("POST", "/nfse")])
+        enviado = nfse_df._desempacotar_xml(c.corpos_post[0]["dpsXmlGZipB64"])
+        _check("o que foi enviado já está no leiaute da Sefin (sem IM, com finNFSe)",
+               "<IM>" not in enviado and "finNFSe" in enviado and dps_id in enviado)
+        log = json.loads((Path(t) / "nfse_INV_A.json").read_text(encoding="utf-8"))
+        _check("log nfse_<fatura>.json tem chave_acesso e padrao nacional",
+               log["chave_acesso"] == CHAVE and log["padrao"] == "nacional" and log["numero_nfse"] == "1")
+        _check("XML da NFS-e arquivado e apontado, byte a byte",
+               Path(r["xml_retorno_path"]).read_text(encoding="utf-8") == NFSE_XML)
+        _check("reserva da DPS liberada", "INV_A" not in c.pendentes_dps())
+        _check("contador de RPS (ABRASF) intocado", not (Path(t) / ".contador_rps.json").exists())
+        _check("chamadas à Sefin rodam via asyncio.to_thread", len(c.to_thread) == 2)
+
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(404, ERRO_E2404), (400, ERRO_E0625), (404, ERRO_E2404), (400, ERRO_E0625)])
+        r1, r2 = c.emitir(), c.emitir()
+        _check("rejeição -> falha com o código da Sefin", not r1["sucesso"] and "E0625" in r1["mensagem_erro"])
+        _check("rejeição não queima número: 2ª tentativa reusa o mesmo nDPS",
+               len(c.ids_montados) == 2 and c.ids_montados[0] == c.ids_montados[1])
+        _check("rejeição não grava índice de nota", not (Path(t) / "nfse_INV_A.json").exists())
+        c.respostas = [(404, ERRO_E2404), (400, ERRO_E0625)]
+        c.emitir(invoice_id="INV_B")
+        _check("outra fatura recebe outro número", c.ids_montados[2] != c.ids_montados[0])
+
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(200, {"chaveAcesso": CHAVE}),
+                               (200, {"chaveAcesso": CHAVE, "nfseXmlGZipB64": _gzip_b64(NFSE_XML)})])
+        r = c.emitir()
+        _check("recupera_sem_reenviar: nota já aceita é recuperada, sem POST",
+               r["sucesso"] and r["chave_acesso"] == CHAVE and r["numero_nfse"] == "1"
+               and c.chamadas == [("GET", "/dps/" + c.ids_montados[0]), ("GET", "/nfse/" + CHAVE)])
+        _check("recuperação grava o índice e libera a reserva",
+               (Path(t) / "nfse_INV_A.json").exists() and "INV_A" not in c.pendentes_dps())
+
+    with tempfile.TemporaryDirectory() as t:
+        outra = _gzip_b64(_nfse_xml(cnpj_tomador="11222333000181"))
+        c = _Cenario(Path(t), [(200, {"chaveAcesso": CHAVE}), (200, {"chaveAcesso": CHAVE, "nfseXmlGZipB64": outra})])
+        r = c.emitir()
+        _check("nota existente de OUTRO tomador não é adotada (número de DPS reaproveitado)",
+               not r["sucesso"] and CHAVE in r["mensagem_erro"] and not (Path(t) / "nfse_INV_A.json").exists()
+               and all(m != "POST" for m, _ in c.chamadas))
+
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [(404, ERRO_E2404), httpx.ReadTimeout("tempo esgotado")])
+        r = c.emitir()
+        _check("timeout -> falha sem exceção, reserva mantida",
+               not r["sucesso"] and "Sefin" in r["mensagem_erro"] and "INV_A" in c.pendentes_dps())
+
+    with tempfile.TemporaryDirectory() as t:
+        c = _Cenario(Path(t), [], dry_run=True)
+        r = c.emitir()
+        _check("dry-run: monta e assina, zero chamadas à Sefin",
+               r["sucesso"] and r["numero_nfse"].startswith("DRY-RUN-DPS-") and c.chamadas == []
+               and not (Path(t) / "nfse_INV_A.json").exists())
+
+
+def teste_despacho() -> None:
+    print("5) emitir_nfse — despacho por padrão e competência:")
+
+    def backend(padrao: str, competencia):
+        usados: list[str] = []
+
+        async def abrasf(*a, **k):
+            usados.append("abrasf204")
+            return {"sucesso": False}
+
+        async def nacional(*a, **k):
+            usados.append("nacional")
+            return {"sucesso": False}
+
+        with patch.object(nfse_df.settings, "nfse_padrao", padrao), \
+                patch.object(nfse_df, "_emitir_abrasf204", abrasf), patch.object(nfse_df, "_emitir_nacional", nacional):
+            asyncio.run(nfse_df.emitir_nfse({"id": "X"}, None, competencia=competencia))
+        return usados[0]
+
+    _check("despacho_retroativo: 2026-10 com padrao=nacional vai pro ABRASF", backend("nacional", "2026-10") == "abrasf204")
+    _check("competência 2026-11 fica no nacional", backend("nacional", "2026-11") == "nacional")
+    _check("sem competência fica no nacional", backend("nacional", None) == "nacional")
+    _check("padrao=abrasf204 segue no ABRASF", backend("abrasf204", None) == "abrasf204")
+
+
 if __name__ == "__main__":
     teste_ajuste_leiaute()
     teste_transporte()
     teste_nao_json()
+    teste_emissao()
+    teste_despacho()
     print()
     if _falhas:
         print(f"{_falhas} verificação(ões) FALHARAM.")

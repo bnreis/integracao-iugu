@@ -145,12 +145,15 @@ class ResultadoEmissao:
     mensagem_erro: Optional[str] = None
     mensagens: list[str] = field(default_factory=list)
     ambiente: Optional[str] = None
+    # Chave de acesso (50 dígitos) — só no backend nacional (Sefin). None no ABRASF.
+    chave_acesso: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "sucesso": self.sucesso,
             "numero_nfse": self.numero_nfse,
             "codigo_verificacao": self.codigo_verificacao,
+            "chave_acesso": self.chave_acesso,
             "xml_enviado_path": str(self.xml_enviado_path) if self.xml_enviado_path else None,
             "xml_retorno_path": str(self.xml_retorno_path) if self.xml_retorno_path else None,
             "pdf_path": str(self.pdf_path) if self.pdf_path else None,
@@ -173,6 +176,9 @@ class ResultadoEmissao:
 #   - assinatura: async def emitir_nfse(invoice, empresa)
 #   - retorno: dict com a chave "sucesso" (ResultadoEmissao.to_dict())
 # =============================================================================
+_COMPETENCIA_INICIO_NACIONAL = "2026-11"
+
+
 async def emitir_nfse(
     invoice: dict[str, Any], empresa: Empresa, competencia: Optional[str] = None
 ) -> dict[str, Any]:
@@ -193,7 +199,10 @@ async def emitir_nfse(
         Resultado em dict (ResultadoEmissao.to_dict()), idêntico em ambos os backends.
     """
     padrao = (settings.nfse_padrao or "nacional").lower()
-    if padrao == "abrasf204":
+    # Competência anterior a 11/2026 vai sempre pelo ABRASF: a ISSnet só recusa (L120)
+    # competência >= 01/11/2026, e o DF só existe na Sefin Nacional desde 27/10/2026.
+    retroativa = bool(competencia) and competencia[:7] < _COMPETENCIA_INICIO_NACIONAL
+    if padrao == "abrasf204" or retroativa:
         return await _emitir_abrasf204(invoice, empresa, competencia=competencia)
     # Default e fallback: caminho nacional (comportamento de produção atual).
     return await _emitir_nacional(invoice, empresa, competencia=competencia)
@@ -454,20 +463,24 @@ _COUNTER_RPS_FILE = Path(settings.nfse_output_dir) / ".contador_rps.json"
 _RPS_PENDENTE_TTL_SEGUNDOS = 30 * 24 * 3600
 
 
-def _ler_contador_rps() -> dict[str, Any]:
-    if _COUNTER_RPS_FILE.exists():
-        return json.loads(_COUNTER_RPS_FILE.read_text(encoding="utf-8"))
+# `arquivo` (opcional) nas 4 funções abaixo: None = contador de RPS (ABRASF). O backend
+# nacional passa o contador da DPS para ter a MESMA reserva por fatura.
+def _ler_contador_rps(arquivo: Optional[Path] = None) -> dict[str, Any]:
+    arquivo = arquivo or _COUNTER_RPS_FILE
+    if arquivo.exists():
+        return json.loads(arquivo.read_text(encoding="utf-8"))
     return {"ultimo_numero": 0}
 
 
-def _gravar_contador_rps(data: dict[str, Any]) -> None:
+def _gravar_contador_rps(data: dict[str, Any], arquivo: Optional[Path] = None) -> None:
     """Grava o contador via arquivo temporário + replace (um crash não deixa JSON pela metade)."""
-    tmp = _COUNTER_RPS_FILE.with_name(_COUNTER_RPS_FILE.name + ".tmp")
+    arquivo = arquivo or _COUNTER_RPS_FILE
+    tmp = arquivo.with_name(arquivo.name + ".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
-    os.replace(tmp, _COUNTER_RPS_FILE)
+    os.replace(tmp, arquivo)
 
 
-def _proximo_numero_rps(invoice_id: Optional[str] = None) -> str:
+def _proximo_numero_rps(invoice_id: Optional[str] = None, arquivo: Optional[Path] = None) -> str:
     """Devolve o número de RPS (série 3) sem zeros à esquerda, atomicamente.
 
     Reutiliza _adquirir_lock_contador/_liberar_lock_contador (lock ENTRE PROCESSOS,
@@ -488,7 +501,7 @@ def _proximo_numero_rps(invoice_id: Optional[str] = None) -> str:
     Path(settings.nfse_output_dir).mkdir(parents=True, exist_ok=True)
     fd = _adquirir_lock_contador()
     try:
-        data = _ler_contador_rps()
+        data = _ler_contador_rps(arquivo)
         agora = time.time()
         pendentes = {
             k: v for k, v in (data.get("pendentes") or {}).items()
@@ -502,20 +515,20 @@ def _proximo_numero_rps(invoice_id: Optional[str] = None) -> str:
             )
             if pendentes != (data.get("pendentes") or {}):
                 data["pendentes"] = pendentes
-                _gravar_contador_rps(data)
+                _gravar_contador_rps(data, arquivo)
             return numero
 
         data["ultimo_numero"] = int(data.get("ultimo_numero", 0)) + 1
         if invoice_id:
             pendentes[invoice_id] = {"numero": data["ultimo_numero"], "ts": agora}
         data["pendentes"] = pendentes
-        _gravar_contador_rps(data)
+        _gravar_contador_rps(data, arquivo)
         return str(data["ultimo_numero"])
     finally:
         _liberar_lock_contador(fd)
 
 
-def _liberar_rps_pendente(invoice_id: Optional[str]) -> None:
+def _liberar_rps_pendente(invoice_id: Optional[str], arquivo: Optional[Path] = None) -> None:
     """Remove a reserva de RPS da fatura (chamar quando a NFS-e foi emitida).
 
     Best-effort: se falhar, só loga — a reserva órfã é inofensiva (a fatura já tem
@@ -526,10 +539,10 @@ def _liberar_rps_pendente(invoice_id: Optional[str]) -> None:
     try:
         fd = _adquirir_lock_contador()
         try:
-            data = _ler_contador_rps()
+            data = _ler_contador_rps(arquivo)
             if invoice_id in (data.get("pendentes") or {}):
                 del data["pendentes"][invoice_id]
-                _gravar_contador_rps(data)
+                _gravar_contador_rps(data, arquivo)
         finally:
             _liberar_lock_contador(fd)
     except Exception as exc:
@@ -1517,11 +1530,12 @@ def _parsear_resposta_sefin(status: int, corpo: dict[str, Any]) -> dict[str, Any
 async def _emitir_nacional(
     invoice: dict[str, Any], empresa: Empresa, competencia: Optional[str] = None
 ) -> dict[str, Any]:
-    """Emite uma NFS-e no DF (Padrão Nacional / DPS) para uma fatura paga da Iugu.
+    """Emite uma NFS-e pela API REST da Sefin Nacional (DPS) para uma fatura paga da Iugu.
 
-    `competencia` ("YYYY-MM") é registrada no log para a anti-duplicata retroativa.
-    ⚠️ O backend nacional NÃO está ativo em produção (padrão = abrasf204); a
-    competência retroativa no XML da DPS não foi implementada aqui — só no ABRASF.
+    Único caminho aceito p/ Simples Nacional com competência >= 01/11/2026 (L120 da
+    ISSnet). Número de DPS reservado por fatura; antes de enviar, recupera a nota se
+    esta DPS já tiver sido aceita (nunca reemite). `competencia` ("YYYY-MM") vai no
+    dCompet e no log; competência anterior a 11/2026 nem chega aqui (ver emitir_nfse).
 
     Args:
         invoice: payload completo da fatura da Iugu (tem payer_address_*, payer_name, etc.)
@@ -1576,41 +1590,23 @@ async def _emitir_nacional(
         f"{' [DRY-RUN]' if settings.nfse_dry_run else ''}"
     )
 
-    # --- DRY-RUN: monta os dados e loga, mas não gera XML nem envia ---
-    if settings.nfse_dry_run:
-        logger.info(
-            f"[NFS-e DRY-RUN] Dados montados com sucesso:\n"
-            f"  Tomador:    {empresa.razao_social} ({empresa.cnpj})\n"
-            f"  E-mail:     {empresa.email}\n"
-            f"  Serviço:    {servico.codigo_servico} — {servico.descricao}\n"
-            f"  Valor:      R$ {format_cents_to_br(total_cents)}\n"
-            f"  Alíquota:   {servico.aliquota_iss}%\n"
-            f"  Endereço:   {endereco_tomador}\n"
-            f"  Prestador:  {settings.nfse_razao_social_prestador} ({settings.nfse_cnpj_prestador})\n"
-            f"  IM:         {settings.nfse_inscricao_municipal}\n"
-            f"  Ambiente:   {settings.nfse_ambiente}\n"
-            f"  ⚠️  XML NÃO gerado, NÃO enviado (dry-run ativo)"
-        )
-        return ResultadoEmissao(
-            sucesso=True,
-            numero_nfse=f"DRY-RUN-{empresa.cnpj[-4:]}",
-            ambiente=f"{settings.nfse_ambiente} (dry-run)",
-            mensagens=["DRY-RUN: dados montados com sucesso, XML não gerado"],
-        ).to_dict()
+    resultado = ResultadoEmissao(sucesso=False, ambiente=settings.nfse_ambiente)
+    invoice_id = invoice.get("id")
 
-    resultado = ResultadoEmissao(
-        sucesso=False, ambiente=settings.nfse_ambiente
-    )
-
-    # 3. Montar DPS
+    # 3. Montar a DPS (número RESERVADO por fatura, como no RPS) e ajustar ao leiaute da Sefin
     try:
-        numero_dps = _proximo_numero_dps()
+        numero_dps = _proximo_numero_rps(invoice_id, arquivo=_COUNTER_FILE)
         xml_dps, dps_id = _montar_xml_dps(
             empresa=empresa,
             servico=servico,
             endereco_tomador=endereco_tomador,
             invoice=invoice,
             numero_dps=numero_dps,
+        )
+        xml_dps = _ajustar_dps_para_sefin(
+            xml_dps,
+            iss_retido=bool(getattr(empresa, "iss_retido", False)),
+            competencia=competencia,
         )
     except Exception as exc:
         logger.exception("Falha ao montar DPS")
@@ -1625,86 +1621,110 @@ async def _emitir_nacional(
         resultado.mensagem_erro = f"Erro ao assinar XML: {exc}"
         return resultado.to_dict()
 
-    # 5. Arquivar DPS assinada (conteúdo interno, sem envelope SOAP)
+    # 5. Arquivar a DPS assinada (é exatamente o que vai compactado no JSON)
     try:
-        _arquivar(xml_assinado, prefix=f"dps_{numero_dps}", suffix="dps_assinada")
+        resultado.xml_enviado_path = _arquivar(
+            xml_assinado, prefix=f"dps_{numero_dps}", suffix="dps_assinada"
+        )
     except Exception as exc:
         logger.warning(f"Não foi possível arquivar DPS assinada: {exc}")
 
-    # 6. Enviar ao webservice
-    endpoint = get_nfse_endpoint()
-    if not endpoint:
-        resultado.mensagem_erro = (
-            "URL do webservice NFS-e DF não configurada. "
-            "Preencha NFSE_WS_URL_HOMOLOGACAO ou NFSE_WS_URL_PRODUCAO no .env."
+    if settings.nfse_dry_run:
+        logger.info(
+            f"[NFS-e Nacional DRY-RUN] DPS {numero_dps} montada e assinada; "
+            f"NÃO enviada (dry-run ativo)."
         )
+        resultado.sucesso = True
+        resultado.numero_nfse = f"DRY-RUN-DPS-{numero_dps}"
+        resultado.ambiente = f"{settings.nfse_ambiente} (dry-run)"
+        resultado.mensagens = ["DRY-RUN nacional: DPS montada+assinada, não enviada"]
         return resultado.to_dict()
 
+    # 6. Sefin Nacional. Antes de enviar, pergunta se ESTA DPS já virou nota (tentativa
+    # anterior que deu timeout depois do aceite): se sim, recupera em vez de reemitir.
+    # Tudo em thread: httpx é síncrono e não pode congelar o event loop do uvicorn.
+    corpo: dict[str, Any] = {}
     try:
-        resposta_xml, status_code, envelope_enviado = _enviar_ao_webservice(
-            xml_assinado, endpoint
-        )
+        status, corpo = await asyncio.to_thread(_sefin_request, "GET", f"/dps/{dps_id}")
+        if status == 200 and corpo.get("chaveAcesso"):
+            chave = corpo["chaveAcesso"]
+            _, corpo = await asyncio.to_thread(_sefin_request, "GET", f"/nfse/{chave}")
+            info = _parsear_resposta_sefin(201, {**corpo, "chaveAcesso": chave})
+            # O número de DPS pode ter sido reaproveitado (contador perdido): só adota a
+            # nota se for da MESMA operação; senão acusaria nota de outro cliente.
+            if not info["sucesso"] or not _mesma_operacao(xml_dps, info["xml_nfse"]):
+                info["sucesso"] = False
+                info["mensagem_erro"] = (
+                    f"A DPS {numero_dps} (série {settings.nfse_serie_padrao}) já gerou a NFS-e de "
+                    f"chave {chave}, que não confere com esta fatura (tomador/valor). Nada foi "
+                    f"enviado. Confira a nota no portal nacional e o contador de DPS."
+                )
+            else:
+                logger.warning(
+                    f"[NFS-e Nacional] Nota já existente recuperada para a DPS {numero_dps} "
+                    f"(chave {chave}) — nenhuma nova emissão"
+                )
+        else:
+            status, corpo = await asyncio.to_thread(
+                _sefin_request, "POST", "/nfse", {"dpsXmlGZipB64": _empacotar_dps(xml_assinado)}
+            )
+            info = _parsear_resposta_sefin(status, corpo)
     except Exception as exc:
-        logger.exception("Falha ao enviar DPS ao webservice")
-        resultado.mensagem_erro = f"Erro ao enviar ao webservice: {exc}"
+        logger.exception("Falha ao comunicar com a Sefin Nacional")
+        resultado.mensagem_erro = f"Erro ao enviar à Sefin Nacional: {exc}"
         return resultado.to_dict()
 
-    # 7. Arquivar envelope efetivamente enviado (SOAP completo) + retorno
-    try:
-        resultado.xml_enviado_path = _arquivar(
-            envelope_enviado, prefix=f"dps_{numero_dps}", suffix="enviada"
-        )
-    except Exception as exc:
-        logger.warning(f"Não foi possível arquivar envelope enviado: {exc}")
+    resultado.mensagens = info["mensagens"]
 
+    if not info["sucesso"]:
+        try:
+            resultado.xml_retorno_path = _arquivar(
+                json.dumps(corpo, ensure_ascii=False, indent=1),
+                prefix=f"dps_{numero_dps}", suffix="retorno", ext="json",
+            )
+        except Exception as exc:
+            logger.warning(f"Não foi possível arquivar retorno: {exc}")
+        resultado.mensagem_erro = info["mensagem_erro"] or "NFS-e não foi aprovada pela Sefin Nacional"
+        logger.error(f"[NFS-e Nacional] DPS {numero_dps} rejeitada: {resultado.mensagem_erro}")
+        return resultado.to_dict()
+
+    # 7. Sucesso: arquiva a NFS-e oficial SEM reserializar (preserva a assinatura)
     try:
         resultado.xml_retorno_path = _arquivar(
-            resposta_xml, prefix=f"dps_{numero_dps}", suffix="retorno"
+            info["xml_nfse"], prefix=f"dps_{numero_dps}", suffix="retorno"
         )
     except Exception as exc:
         logger.warning(f"Não foi possível arquivar retorno: {exc}")
-
-    if status_code >= 400:
-        resultado.mensagem_erro = (
-            f"Webservice retornou HTTP {status_code}. Veja {resultado.xml_retorno_path}"
-        )
-        logger.error(
-            f"[NFS-e] Webservice respondeu HTTP {status_code} "
-            f"para {endpoint} — retorno arquivado em {resultado.xml_retorno_path}"
-        )
-        return resultado.to_dict()
-
-    # 8. Parsear retorno
-    try:
-        info = _parsear_resposta(resposta_xml)
-        resultado.numero_nfse = info.get("numero_nfse")
-        resultado.codigo_verificacao = info.get("codigo_verificacao")
-        resultado.mensagens = info.get("mensagens", [])
-        resultado.sucesso = info.get("sucesso", False)
-        if not resultado.sucesso and not resultado.mensagem_erro:
-            resultado.mensagem_erro = (
-                info.get("mensagem_erro") or "NFS-e não foi aprovada pelo ISS DF"
-            )
-    except Exception as exc:
-        logger.exception("Falha ao parsear retorno")
-        resultado.mensagem_erro = f"Erro ao parsear retorno: {exc}"
-        return resultado.to_dict()
-
-    if resultado.sucesso:
-        logger.info(
-            f"[NFS-e] Emissão OK: número {resultado.numero_nfse} "
-            f"código {resultado.codigo_verificacao}"
-        )
-        # Grava o índice nfse_<invoice_id>.json que a API usa para detectar a nota
-        # (listagem/detalhe/dashboard). Resiliente: não derruba a emissão se falhar.
-        # No backend nacional o documento de origem é a DPS — passamos numero_dps.
-        _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_dps, competencia=competencia)
-        # Não geramos mais PDF próprio (reportlab removido). O DANFSE oficial será
-        # obtido do ISSnet via ConsultarUrlNfse no futuro; até lá, resultado.pdf_path
-        # permanece None e o e-mail segue só com o XML.
-        # TODO ConsultarUrlNfse: preencher resultado.pdf_path com a URL/PDF oficial.
+    resultado.sucesso = True
+    resultado.numero_nfse = info["numero_nfse"]
+    resultado.chave_acesso = info["chave_acesso"]
+    # Consumidores (painel, app) mostram "código de verificação": no nacional é a chave.
+    resultado.codigo_verificacao = info["chave_acesso"]
+    logger.info(
+        f"[NFS-e Nacional] Emissão OK: número {resultado.numero_nfse} "
+        f"chave {resultado.chave_acesso}"
+    )
+    # Índice nfse_<invoice_id>.json que a API e o guardrail leem. Resiliente por design.
+    _gravar_log_nfse(invoice, empresa, resultado, rps_numero=numero_dps, competencia=competencia)
+    # Nota emitida: a reserva do número desta fatura não é mais necessária.
+    _liberar_rps_pendente(invoice_id, arquivo=_COUNTER_FILE)
 
     return resultado.to_dict()
+
+
+def _mesma_operacao(xml_dps: str, xml_nfse: Optional[str]) -> bool:
+    """True se a NFS-e recuperada é da mesma operação da DPS: mesmo tomador e mesmo valor."""
+    if not xml_nfse:
+        return False
+    from lxml import etree
+
+    def _chave(xml: str) -> tuple[str, str]:
+        raiz = etree.fromstring(xml.encode("utf-8"), _get_safe_xml_parser())
+        doc = raiz.xpath("string(//*[local-name()='toma']/*[local-name()='CNPJ' or local-name()='CPF'])")
+        valor = raiz.xpath("string(//*[local-name()='vServPrest']/*[local-name()='vServ'])")
+        return doc.strip(), valor.strip()
+
+    return _chave(xml_dps) == _chave(xml_nfse) and all(_chave(xml_dps))
 
 
 # =============================================================================
@@ -2769,11 +2789,11 @@ def _text_child(element, localname: str) -> Optional[str]:
 # =============================================================================
 # ARQUIVAMENTO EM DISCO
 # =============================================================================
-def _arquivar(xml_str: str, prefix: str, suffix: str) -> Path:
-    """Salva o XML em /nfse_emitidas/ com timestamp. Retorna o caminho."""
+def _arquivar(xml_str: str, prefix: str, suffix: str, ext: str = "xml") -> Path:
+    """Salva o XML (ou JSON de erro da Sefin) em /nfse_emitidas/ com timestamp. Retorna o caminho."""
     Path(settings.nfse_output_dir).mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    fname = f"{prefix}_{suffix}_{ts}.xml"
+    fname = f"{prefix}_{suffix}_{ts}.{ext}"
     caminho = Path(settings.nfse_output_dir) / fname
     caminho.write_text(xml_str, encoding="utf-8")
     return caminho
@@ -2831,6 +2851,8 @@ def _gravar_log_nfse(
         "invoice_id": invoice_id,
         "numero_nfse": resultado.numero_nfse,
         "codigo_verificacao": resultado.codigo_verificacao,
+        # Chave de acesso nacional (None no ABRASF) — o e-mail usa p/ o link de consulta.
+        "chave_acesso": resultado.chave_acesso,
         "cnpj": empresa.cnpj,
         "razao_social": empresa.razao_social,
         "valor": valor_reais,
