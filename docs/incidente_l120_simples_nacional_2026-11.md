@@ -117,7 +117,7 @@ descoberta pelo erro devolvido; estão todas em `ajustar()` no script:
 | 10 | `E0310` código de tributação nacional não existe na lista nacional | O cadastro real traz `01.07`, que virava `010700`. Não existe desdobro `00`: `_normalizar_cTribNac` passa a assumir `01` (→ `010701`). Achado na prova com o código real (8.1) |
 
 **O que ainda NÃO foi testado (antes de ligar em produção)**
-- Endpoint de **produção** (`sefin.nfse.gov.br`) e se a parametrização do DF lá é igual à da produção restrita.
+- **Emissão** em produção (`POST`): o endpoint e a parametrização do DF já responderam à sonda de leitura (8.2).
 - Cancelamento (evento) e **DANFSE (PDF)**; o link de consulta pública do e-mail (`nfse.gov.br/ConsultaPublica`).
 - Grupo `IBSCBS` preenchido de verdade (`cIndOp` válido) — hoje só passou **sem** o grupo.
 - Tomador fora do DF em cidade **fora** da tabela de `_codigo_ibge_por_cidade`: o código recusa antes de enviar
@@ -148,6 +148,19 @@ Rodada numa **cópia separada** do código na VPS (`/tmp/homolog_nacional/src`, 
 | F | Contador de DPS atrasado em 1 | 1ª tentativa recusa sem enviar ("contador de DPS desta máquina está atrasado"), 2ª usa o número seguinte → NFS-e nº 5 |
 
 Notas de homologação geradas (sem valor fiscal): nº 2 a 5, DPS 900101–900104, série 00001.
+
+### 8.2 Sonda de produção, somente leitura (12/11)
+
+Só `GET`, da VPS, com o A1 da MegaTeam — nada foi emitido:
+
+- `GET https://sefin.nfse.gov.br/SefinNacional/nfse/<chave inexistente>` → `404` `E2401` (`tipoAmbiente 1`,
+  `SefinNacional_1.6.0`): o endpoint de produção aceita o nosso certificado e responde no mesmo formato.
+- `GET .../dps/<Id da série 00001, números 1 e 2>` → `404` `E2404`: a numeração que o contador novo vai usar
+  em produção (começa em 1) está livre.
+- `GET https://adn.nfse.gov.br/parametrizacao/5300108/convenio` → `aderenteAmbienteNacional=1`,
+  `aderenteEmissorNacional=1`; `.../01.07.01.001/<hoje>/aliquota` → `2.00` (desde 01/05/2025). TLS ≤ 1.2.
+
+Falta só a emissão real: uma fatura escolhida pelo Bruno, com `NFSE_PADRAO=nacional` na MegaTeam.
 
 ## 7. Como diagnosticar de novo
 
