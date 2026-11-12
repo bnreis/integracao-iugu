@@ -15,6 +15,7 @@ ADR-0006: `Aceito`** (implementados e em produção).
 | [ADR-0004](ADR-0004-config-negocio-desacoplada-do-notes.md) | Desacoplar a config de negócio do campo `notes` da Iugu | Proposto | N+1 GETs à Iugu + config fiscal acoplada a campo de texto de terceiro |
 | [ADR-0005](ADR-0005-abrasf-2.04-rps.md) | Emissão de NFS-e DF via ABRASF 2.04 (RPS) como caminho de produção de transição | **Aceito (em produção)** | Padrão Nacional (DPS) dá HTTP 404 em produção; DF confirmou ABRASF 2.04 (RPS série 3) até 30/06/2026 |
 | [ADR-0006](ADR-0006-guardrail-evidencia-lock-por-fatura.md) | Guardrail anti-duplicata por evidência + lock por fatura (cross-process) | **Aceito (em produção)** | Falso "já emitida" por flag + risco de NFS-e duplicada em reentrega/cron antes de ligar a auto-emissão |
+| [ADR-0008](ADR-0008-emissao-api-nacional-sefin.md) | Emissão de NFS-e pela API REST da Sefin Nacional, com reserva de DPS e recuperação de nota | **Em produção (MegaTeam, 12/11/2026)** | `L120`: a ISSnet (ABRASF) recusa Simples Nacional desde 01/11/2026 |
 
 > ✅ **ADR-0005 foi confirmado e está em produção** (06/2026): o DF habilitou a MEGASUPORTE e o
 > webservice oficial é **ABRASF 2.04 (RPS série 3)**. A arquitetura dual (`NFSE_PADRAO`) mantém o
