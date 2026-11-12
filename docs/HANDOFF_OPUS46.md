@@ -16,16 +16,17 @@ REST com mTLS à Sefin Nacional (`POST /nfse`), com número de DPS reservado por
 consulta antes de enviar (`GET /dps/<id>`) e recuperação após timeout. Competência < 11/2026 segue no ABRASF.
 E-mail da nota nacional = XML + link de consulta pública (sem PDF local).
 
-**Primeira nota real:** NFS-e **nº 1**, 12/11 15:44 BRT, Star Corretora de Seguros, R$ 530,00, DPS nº 2,
-chave `53001082227987745000142000000000000126117434681426`.
+**Notas reais em 12/11 (todas pelo painel, e-mail enviado):** nº 1 Star Corretora R$ 530,00 (15:44 BRT, chave
+`53001082227987745000142000000000000126117434681426`), nº 2 Grau Técnico R$ 1.500,00, nº 3 KEMMI PHARMA
+R$ 2.200,00, nº 4 SINDICONDOMINIO-DF R$ 3.150,00. Contador de DPS em 4.
 
 **Armadilha descoberta:** produção e homologação usam XSDs diferentes (`E1235` na primeira tentativa real) —
 `NFSE_SEFIN_LEIAUTE_NOVO` no `.env`. Seção 8.3 do incidente.
 
 **Pendências (decisão do Bruno / contador):**
-- Fatura do Grau Técnico (`AFFDDCC8…`, R$ 1.500,00): recusada 2× antes da correção; DPS nº 1 reservada — reemitir pelo painel.
-- Faturas paradas de 05–11/11 (RPS 196–200): ABRIG R$ 580, SINDICONDOMINIO-DF R$ 3.150, KEMMI PHARMA R$ 2.200
-  (esta falhou com `E232`, não `L120` — conferir na ISSnet se a nota não saiu antes de emitir de novo).
+- Das faturas paradas de 05–11/11 só falta a **ABRIG** (R$ 580,00, fatura `52952A51…`, RPS 196).
+- **KEMMI:** antes do L120 ela tinha falhado no ABRASF com `E232` (intermitente). Conferir na ISSnet (RPS 200,
+  série 3) se não existe nota municipal de novembro — se existir, a NFS-e nacional nº 3 é duplicata.
 - ISS retido: em homologação a nota veio com `vLiq` igual ao bruto (não descontou a retenção) — conferir com o
   contador antes da primeira nota real com retenção.
 - Não implementado: cancelamento pela API, DANFSE (PDF) no e-mail, `IBSCBS` (obrigatório p/ Simples só em 2027).

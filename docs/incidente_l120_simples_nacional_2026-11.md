@@ -1,7 +1,7 @@
 # Incidente — L120: ISSnet bloqueia RPS (ABRASF) com competência ≥ 01/11/2026 para Simples Nacional (2026-11-05 →)
 
 - **Status:** ✅ **Resolvido em 2026-11-12** — a MegaTeam emite pela API da Sefin Nacional (`NFSE_PADRAO=nacional`,
-  ADR-0008). Primeira nota real: NFS-e nº 1 (seção 8.4). Pendente: decidir as faturas paradas (seção 6).
+  ADR-0008). Primeira nota real: NFS-e nº 1 (seção 8.4). Em 12/11 saíram 4 notas reais (seção 8.4); das faturas paradas só falta a da ABRIG (seção 6).
 - **Severidade:** Alta — **todas** as emissões da MegaTeam (ABRASF 2.04, optante Simples Nacional) falham desde 05/11.
 - **Componente:** `src/nfse_df.py` (`_emitir_abrasf204`, competência = hoje).
 - **Causa:** externa (mudança de regra da ISSnet/DF), previsível pelo cronograma do Padrão Nacional.
@@ -75,7 +75,9 @@ O construtor/assinador de DPS existente é reaproveitável; o **transporte e o p
 ## 6. Pendências
 
 - ~~Decidir A/B/C; abrir ADR para C~~ — feito: opção C, ADR-0008, em produção desde 12/11.
-- Resolver as 5 faturas paradas (acima) e depois `Marcar como emitida` se feitas no portal nacional.
+- Faturas paradas: 4 das 5 foram emitidas pela API Nacional em 12/11 (seção 8.4). **Falta a da ABRIG**
+  (R$ 580,00, fatura `52952A5190964234B8B49BE9370DA4A3`, RPS 196) — decisão do Bruno.
+- Conferir na ISSnet se a KEMMI não tem nota municipal de novembro (ver seção 8.4).
 - Conferir se há **MegaSuporte** afetada (instância desativada) e demais empresas Simples Nacional.
 - ~~Atualizar `CLAUDE.md`/ADR-0005~~ — feito em 12/11.
 - Se o E232 reaparecer em volume, seguir o postmortem de outubro.
@@ -207,8 +209,23 @@ Emitida pelo Bruno no painel, fatura `03483C480E1B44C8ABD617F476D8BE89` (Star Co
 - O link de consulta pública do e-mail (`https://www.nfse.gov.br/ConsultaPublica/?tpc=1&chave=<chave>`) abre com
   a chave preenchida e pede captcha — conferido.
 - A nota de ME/EPP do Simples sem retenção vem **sem** `vBC`/`vISSQN` (ISS apurado no DAS); só `vLiq`.
-- A DPS nº 1 continua reservada para a fatura `AFFDDCC8…` (Grau Técnico, R$ 1.500,00), recusada duas vezes com
-  `E1235` antes da correção e ainda não reemitida. A reserva não expira; a próxima tentativa usa o nº 1.
+- A fatura do Grau Técnico, recusada duas vezes com `E1235` antes da correção, foi reemitida às 15:59 e usou a
+  **mesma DPS nº 1** que estava reservada para ela — a reserva por fatura funcionou em produção.
+
+**Notas reais de 12/11/2026** (todas pelo painel, competência 11/2026, e-mail enviado ao tomador em cada uma):
+
+| NFS-e | DPS | Hora (BRT) | Tomador | Valor | Fatura Iugu |
+|---|---|---|---|---|---|
+| 1 | 2 | 15:44 | Star Corretora de Seguros | R$ 530,00 | `03483C480E1B44C8ABD617F476D8BE89` |
+| 2 | 1 | 15:59 | Centro de Ensino Grau Técnico | R$ 1.500,00 | `AFFDDCC8E01D48968A3A9B4229643D36` |
+| 3 | 3 | 16:00 | KEMMI PHARMA LTDA | R$ 2.200,00 | `EBD5263662D14F54B8E75BB1B371E24C` |
+| 4 | 4 | 16:00 | SINDICONDOMINIO-DF | R$ 3.150,00 | `A93CDD5E091642B4B35EDEF36FA0417F` |
+
+Contador de DPS ao fim do dia: `ultimo_numero = 4`, sem reservas pendentes.
+
+**Hipótese não provada / a conferir:** a fatura da KEMMI tinha falhado no ABRASF com `E232` (erro intermitente da
+ISSnet), não com `L120`. Se alguma daquelas tentativas tiver sido aceita pela ISSnet sem resposta, existe nota
+municipal para a mesma fatura e a NFS-e nº 3 seria duplicata. Conferir no portal da ISSnet (RPS 200, série 3).
 
 ## 7. Como diagnosticar de novo
 
