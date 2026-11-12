@@ -25,8 +25,9 @@ R$ 2.200,00, nº 4 SINDICONDOMINIO-DF R$ 3.150,00. Contador de DPS em 4.
 
 **Pendências (decisão do Bruno / contador):**
 - Das faturas paradas de 05–11/11 só falta a **ABRIG** (R$ 580,00, fatura `52952A51…`, RPS 196).
-- **KEMMI:** antes do L120 ela tinha falhado no ABRASF com `E232` (intermitente). Conferir na ISSnet (RPS 200,
-  série 3) se não existe nota municipal de novembro — se existir, a NFS-e nacional nº 3 é duplicata.
+- **KEMMI:** a única tentativa ABRASF de novembro (RPS 200) foi **respondida** com `E232`, sem timeout — risco de
+  duplicata com a NFS-e nacional nº 3 é muito baixo. `ConsultarNfsePorRps` devolve `E160` (formato do pedido não
+  descoberto); confirmação final só no portal da ISSnet. Seção 8.4 do incidente L120.
 - ISS retido: em homologação a nota veio com `vLiq` igual ao bruto (não descontou a retenção) — conferir com o
   contador antes da primeira nota real com retenção.
 - Não implementado: cancelamento pela API, DANFSE (PDF) no e-mail, `IBSCBS` (obrigatório p/ Simples só em 2027).

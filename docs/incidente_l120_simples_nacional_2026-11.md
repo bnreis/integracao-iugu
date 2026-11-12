@@ -77,7 +77,7 @@ O construtor/assinador de DPS existente é reaproveitável; o **transporte e o p
 - ~~Decidir A/B/C; abrir ADR para C~~ — feito: opção C, ADR-0008, em produção desde 12/11.
 - Faturas paradas: 4 das 5 foram emitidas pela API Nacional em 12/11 (seção 8.4). **Falta a da ABRIG**
   (R$ 580,00, fatura `52952A5190964234B8B49BE9370DA4A3`, RPS 196) — decisão do Bruno.
-- Conferir na ISSnet se a KEMMI não tem nota municipal de novembro (ver seção 8.4).
+- KEMMI: evidência local indica que não há nota municipal de novembro (seção 8.4); confirmar no portal da ISSnet.
 - Conferir se há **MegaSuporte** afetada (instância desativada) e demais empresas Simples Nacional.
 - ~~Atualizar `CLAUDE.md`/ADR-0005~~ — feito em 12/11.
 - Se o E232 reaparecer em volume, seguir o postmortem de outubro.
@@ -223,9 +223,17 @@ Emitida pelo Bruno no painel, fatura `03483C480E1B44C8ABD617F476D8BE89` (Star Co
 
 Contador de DPS ao fim do dia: `ultimo_numero = 4`, sem reservas pendentes.
 
-**Hipótese não provada / a conferir:** a fatura da KEMMI tinha falhado no ABRASF com `E232` (erro intermitente da
-ISSnet), não com `L120`. Se alguma daquelas tentativas tiver sido aceita pela ISSnet sem resposta, existe nota
-municipal para a mesma fatura e a NFS-e nº 3 seria duplicata. Conferir no portal da ISSnet (RPS 200, série 3).
+**KEMMI — risco de duplicata conferido (12/11, só leitura):** a fatura da KEMMI tinha falhado no ABRASF com
+`E232`, não com `L120`. Evidência na VPS (`nfse_emitidas/rps_200_*`): houve **uma única** tentativa (12/11 06:22
+BRT) e a ISSnet **respondeu** `E232 — Ocorreu um erro no processamento do arquivo`, sem nota na resposta. Não
+houve timeout nem envio sem retorno, que é o cenário em que a nota pode ter sido aceita sem sabermos. Somado ao
+fato de que em novembro a ISSnet recusa todo RPS de Simples Nacional (`L120`), a chance de existir nota municipal
+para essa fatura é muito baixa.
+
+**Não provado:** a confirmação direta (`ConsultarNfsePorRps`, RPS 200 série 3) não funcionou — a ISSnet devolveu
+`E160` (esquema) para o pedido no formato do XSD ABRASF 2.04 e também com o envoltório `<Pedido>`; não tentei a
+versão assinada. Quem fecha a questão é a consulta no portal da ISSnet. Vale o mesmo para a pendência antiga de
+outubro (ABRIG/KEMMI, timeouts de 14 e 16/10 — `incidente_e232_issnet_rps_fuso_2026-10.md`).
 
 ## 7. Como diagnosticar de novo
 
