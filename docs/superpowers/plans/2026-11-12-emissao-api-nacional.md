@@ -207,14 +207,22 @@ def teste_email():
 - Modify: `scripts/teste_api_nacional_homolog.py` — apagar o `ajustar()` local e a chamada httpx; passar a chamar `nfse_df.emitir_nfse(invoice, empresa)`.
 
 **Interfaces:**
-- Consumes: código das Tasks 1–3 já na VPS. O script força, **só no processo dele**, `NFSE_PADRAO=nacional`, `NFSE_AMBIENTE=homologacao` e `NFSE_OUTPUT_DIR=<tmp>` por variável de ambiente antes de importar `src` (o serviço em produção segue em `abrasf204`).
+- Consumes: código das Tasks 1–3 já na VPS. O script força, **só no processo dele**, `NFSE_PADRAO=nacional`, `NFSE_AMBIENTE=homologacao` e `NFSE_OUTPUT_DIR=$SAIDA` (um diretório só, mantido entre os casos) por variável de ambiente antes de importar `src` (o serviço em produção segue em `abrasf204`).
 
+- [ ] **Step 0 (somente leitura, antes do pull):** conferir que o `.env` da MegaTeam tem `NFSE_PADRAO=abrasf204` **explícito** (o default do `config.py` é `nacional`, que agora emite de verdade).
 - [ ] **Step 1 (precisa de OK do Bruno):** push + `git pull` **só na MegaTeam**, **sem** mexer no `.env`; restart; conferir pelo domínio público autenticado que o painel responde e `NFSE_PADRAO` continua `abrasf204`. Rodar na VPS `python tests/test_emissao_nacional.py` e `python tests/test_rps_fuso.py`.
-- [ ] **Step 2:** adaptar o script com os casos (env `CASO`): **A** normal R$ 1,00; **B** `iss_retido=True` com `custom_variables valor_bruto_nfse`; **C** tomador de São Paulo/SP (CEP `01310100`); **D** repetir o caso A com o mesmo `invoice["id"]` depois de apagar o `nfse_<id>.json` do tmp.
-- [ ] **Step 3:** rodar A, B, C, D. Esperado: A/B/C → `sucesso=True`, `ambiente=homologacao`, número e chave de 50 dígitos; D → `sucesso=True` com a **mesma chave** de A e o log "Nota já existente recuperada" (nenhuma nota nova).
-- [ ] **Step 4:** se B ou C forem rejeitados, o código de erro devolvido vira regra nova em `_ajustar_dps_para_sefin` **com teste** na Task 1, e repete-se o Step 3. Registrar cada erro na tabela da seção 8 da spec.
-- [ ] **Step 5:** conferir que nada de produção mudou: `.contador_rps.json` igual, sem `.contador_dps.json` nem arquivos `dps_*` em `nfse_emitidas/`.
-- [ ] **Step 6: Commit** — `test(nfse): prova em homologação pela API Nacional com o código real`.
+- [ ] **Step 2 (somente leitura): levantamento das empresas reais.** Para cada empresa ativa (`get_repo()`): `codigo_servico` do cadastro → `_normalizar_cTribNac`; cidade/UF do cadastro na Iugu → `_codigo_ibge_por_cidade(..., default="")`. Listar quem **não** dá `010701` e quem está fora do DF em cidade não mapeada. A prova da seção 8 só cobriu `010701`: se o cadastro real traz `01.07` (→ `010700`), isso tem que ser testado no caso A.
+- [ ] **Step 3:** adaptar o script. **Um único** diretório de saída para todos os casos (env `SAIDA`, criado uma vez e mantido), contador de DPS semeado num número alto ainda não usado na série de homologação, e **valor diferente por caso** (senão um caso "passa" recuperando a nota do outro). Casos (env `CASO`):
+  - **A** normal, R$ 1,00, com a configuração **de uma empresa real** (o `codigo_servico` como está no cadastro) e tomador **com e-mail**;
+  - **B** `iss_retido=True` com `custom_variables valor_bruto_nfse`, R$ 2,00;
+  - **C** tomador de São Paulo/SP (CEP `01310100`), R$ 3,00;
+  - **D** recuperação: apagar o `nfse_<id>.json` de A **e recolocar a reserva de A** em `.contador_dps.json` (é o estado real depois de um timeout), repetir A;
+  - **E** reenviar direto (`_sefin_request("POST", "/nfse", ...)`) a DPS já aceita de A, para registrar o que a Sefin responde a uma DPS repetida;
+  - **F** contador atrasado: voltar `ultimo_numero` em 1 e emitir uma fatura nova, R$ 4,00; repetir.
+- [ ] **Step 4:** rodar. Esperado: A/B/C → `sucesso=True`, `ambiente=homologacao`, número e chave de 50 dígitos; **D** → `sucesso=True` com a **mesma chave** de A, log "Nota já existente recuperada" e **nenhum** POST (isso também prova que `GET /nfse/{chave}` devolve `nfseXmlGZipB64`); **E** → rejeição, com o código anotado; **F** → 1ª tentativa falha com "contador de DPS desta máquina está atrasado" sem POST, 2ª emite com o número seguinte.
+- [ ] **Step 5:** se algum caso for rejeitado (ou o Step 2 achar `cTribNac` diferente de `010701`, ou D mostrar que `GET /nfse` não traz o XML), a correção entra **com teste que falha antes** em `tests/test_emissao_nacional.py`, e repete-se o Step 4. Registrar cada erro na tabela da seção 8 da spec. Mudança em `_ajustar_dps_para_sefin` ou na recuperação pede uma revisão curta do delta antes da Task 6.
+- [ ] **Step 6:** conferir que nada de produção mudou: `.contador_rps.json` igual, sem `.contador_dps.json` nem arquivos `dps_*` em `nfse_emitidas/`.
+- [ ] **Step 7: Commit** — `test(nfse): prova em homologação pela API Nacional com o código real`.
 
 ### Task 6: Virada em produção + documentação
 
@@ -226,5 +234,5 @@ def teste_email():
 - [ ] **Step 2 (OK explícito do Bruno; fatura escolhida por ele):** no `.env` da MegaTeam trocar `NFSE_PADRAO=nacional`, restart, e emitir **uma** fatura pendente pelo painel. É nota fiscal de verdade.
 - [ ] **Step 3: Conferir a primeira nota** — número e chave no painel; nota visível no portal nacional; link `_CONSULTA_NACIONAL + chave` abre a nota (se a URL estiver errada, corrigir a constante + teste antes de seguir); e-mail chegou com o XML. Só depois liberar as demais faturas.
 - [ ] **Step 4: Plano de volta** — qualquer problema: `NFSE_PADRAO=abrasf204` + restart (volta ao estado de hoje; o ABRASF continua recusando novembro com L120, então o contorno é o portal nacional).
-- [ ] **Step 5: Documentar** — ADR-0008 (decisão, endpoints, 9 ajustes, recuperação por `GET /dps`, fora do escopo), demais arquivos acima; memória `l120-api-nacional` atualizada.
+- [ ] **Step 5: Documentar** — ADR-0008 (decisão, endpoints, 9 ajustes, recuperação por `GET /dps`, procedimento para "contador de DPS fora de sincronia", fora do escopo), demais arquivos acima; memória `l120-api-nacional` atualizada.
 - [ ] **Step 6: Commit** — `docs: ADR-0008 e fechamento do incidente L120 (emissão pela API Nacional)`.
